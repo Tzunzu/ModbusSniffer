@@ -7,13 +7,35 @@
             "command": "dotnet",
             "args": [
                 "build",
-                "${workspaceFolder}/ModbusSniffer.csproj"
+                "${workspaceFolder}/ModbusSniffer/ModbusSniffer.csproj"
             ],
             "problemMatcher": "$msCompile",
             "group": {
                 "kind": "build",
                 "isDefault": true
             }
+        },
+        {
+            "label": "build viewer",
+            "type": "process",
+            "command": "dotnet",
+            "args": [
+                "build",
+                "${workspaceFolder}/ModbusSnifferViewer/ModbusSnifferViewer.csproj"
+            ],
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "release",
+            "type": "process",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "if (Test-Path release) { Remove-Item release -Recurse -Force }; dotnet publish ModbusSniffer/ModbusSniffer.csproj -c Release -o release; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; dotnet publish ModbusSnifferViewer/ModbusSnifferViewer.csproj -c Release -o release; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Copy-Item README.md release -Force"
+            ],
+            "problemMatcher": "$msCompile",
+            "group": "build"
         }
     ]
 }

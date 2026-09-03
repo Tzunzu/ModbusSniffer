@@ -2,13 +2,22 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Run ComSniffer (external console)",
+            "name": "Run ModbusSniffer (external console)",
             "type": "coreclr",
             "request": "launch",
             "preLaunchTask": "build",
-            "program": "${workspaceFolder}/bin/Debug/net8.0/ComSniffer.exe",
-            "cwd": "${workspaceFolder}",
+            "program": "${workspaceFolder}/ModbusSniffer/bin/Debug/net8.0/ModbusSniffer.exe",
+            "cwd": "${workspaceFolder}/ModbusSniffer",
             "console": "externalTerminal"
+        },
+        {
+            "name": "Run ModbusSniffer Log Viewer",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build viewer",
+            "program": "${workspaceFolder}/ModbusSnifferViewer/bin/Debug/net8.0-windows/ModbusSnifferViewer.exe",
+            "cwd": "${workspaceFolder}/ModbusSnifferViewer",
+            "console": "internalConsole"
         }
     ]
 }

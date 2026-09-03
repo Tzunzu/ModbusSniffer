@@ -39,7 +39,7 @@ For lower USB latency, set the adapter's latency timer to `1 ms` in its driver s
 ## Run
 
 ```text
-dotnet run --project ModbusSniffer.csproj
+dotnet run --project ModbusSniffer/ModbusSniffer.csproj
 ```
 
 Press `Ctrl+C` to stop a capture.
@@ -47,10 +47,10 @@ Press `Ctrl+C` to stop a capture.
 ## Build Release
 
 ```text
-dotnet publish ModbusSniffer.csproj -c Release -o release
+dotnet publish ModbusSniffer/ModbusSniffer.csproj -c Release -o release
 ```
 
-The Release configuration creates a self-contained, compressed single-file Windows x64 executable with its dependencies embedded.
+The Release configuration creates a self-contained, compressed single-file Windows x64 executable with its dependencies embedded. The VS Code `release` task publishes both applications into the same `release` folder.
 
 ## Output
 
