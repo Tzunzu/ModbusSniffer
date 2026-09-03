@@ -1,0 +1,12 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio and VS Code local state
+.vs/
+*.user
+*.suo
+
+# Runtime logs
+*.log
+log/
