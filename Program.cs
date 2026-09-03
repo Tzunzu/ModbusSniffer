@@ -8,14 +8,7 @@ namespace ModbusSniffer;
 
 internal class Program
 {
-    private const string PortName = "COM7";
-    private const int BaudRate = 57600;
-    private const Parity PortParity = Parity.None;
-    private const int DataBits = 8;
-    private const StopBits PortStopBits = StopBits.One;
-    private const Handshake PortHandshake = Handshake.None;
-    private const int PartialFrameTimeoutMilliseconds = 100;
-    private const int MasterDelayThresholdMilliseconds = 400;
+    private const string ConfigurationFileName = "ModbusSniffer.ini";
     private const int ConsoleBufferWidth = 16384;
     private const string LogDirectoryName = "log";
     private const string LogFilePrefix = "ModbusSniffer_";
@@ -29,6 +22,7 @@ internal class Program
         ConfigureConsoleBuffer();
         DisableConsoleWrapping();
         captureRecords.Clear();
+        ModbusSettings settings = ModbusSettings.Load(Path.Combine(AppContext.BaseDirectory, ConfigurationFileName));
         DateTimeOffset sessionStartedAt = DateTimeOffset.Now;
         string logDirectoryPath = Path.Combine(AppContext.BaseDirectory, LogDirectoryName);
         Directory.CreateDirectory(logDirectoryPath);
@@ -36,10 +30,10 @@ internal class Program
         string summaryFilePath = Path.Combine(logDirectoryPath, $"{SummaryFilePrefix}{sessionStartedAt:yyyy-MM-dd_HH-mm-ss}.txt");
         using var logWriter = new StreamWriter(logFilePath, append: false) { AutoFlush = true };
 
-        using var serialPort = new SerialPort(PortName, BaudRate, PortParity, DataBits, PortStopBits)
+        using var serialPort = new SerialPort(settings.PortName, settings.BaudRate, settings.PortParity, settings.DataBits, settings.PortStopBits)
         {
-            Handshake = PortHandshake,
-            ReadTimeout = PartialFrameTimeoutMilliseconds
+            Handshake = settings.PortHandshake,
+            ReadTimeout = settings.PartialFrameTimeoutMilliseconds
         };
 
         using var cancellationSource = new CancellationTokenSource();
@@ -75,7 +69,7 @@ internal class Program
                 {
                     int bytesRead = serialPort.Read(buffer, 0, buffer.Length);
                     UsbTransmission usbTransmission = CreateUsbTransmission(++usbTransmissionNumber, bytesRead, ref previousUsbTransmissionTimestamp);
-                    ProcessReceivedBytes(receivedBytes, buffer.AsSpan(0, bytesRead), logWriter, ref pendingRequest, ref lastResponse, usbTransmission, frameTransport);
+                    ProcessReceivedBytes(receivedBytes, buffer.AsSpan(0, bytesRead), logWriter, ref pendingRequest, ref lastResponse, usbTransmission, frameTransport, settings.MasterDelayThresholdMilliseconds);
                 }
                 catch (TimeoutException)
                 {
@@ -87,7 +81,7 @@ internal class Program
                 }
                 catch (OperationCanceledException exception)
                 {
-                    Console.Error.WriteLine($"Serial read canceled on {PortName} (port open: {serialPort.IsOpen}): {exception.Message}");
+                    Console.Error.WriteLine($"Serial read canceled on {serialPort.PortName} (port open: {serialPort.IsOpen}): {exception.Message}");
                     return 3;
                 }
             }
@@ -97,7 +91,7 @@ internal class Program
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or ArgumentException)
         {
-            Console.Error.WriteLine($"Could not open {PortName}: {exception.Message}");
+            Console.Error.WriteLine($"Could not open {serialPort.PortName}: {exception.Message}");
             PrintAvailablePorts();
             Console.WriteLine("Press any key to close.");
             if (!Console.IsInputRedirected)
@@ -114,7 +108,7 @@ internal class Program
                 serialPort.Close();
             }
 
-            WriteSummary(summaryFilePath);
+            WriteSummary(summaryFilePath, settings.MasterDelayThresholdMilliseconds);
         }
     }
 
@@ -197,7 +191,8 @@ internal class Program
         ref PendingRequest? pendingRequest,
         ref LastResponse? lastResponse,
         UsbTransmission usbTransmission,
-        FrameTransport frameTransport)
+        FrameTransport frameTransport,
+        int masterDelayThresholdMilliseconds)
     {
         foreach (byte value in bytes)
         {
@@ -220,7 +215,7 @@ internal class Program
                     }
                     else
                     {
-                        PrintMasterDelayIfNeeded(lastResponse, frame, observedAt, logWriter);
+                        PrintMasterDelayIfNeeded(lastResponse, frame, observedAt, logWriter, masterDelayThresholdMilliseconds);
                     }
 
                     pendingRequest = new PendingRequest(frame[0], frame[1], observedAt);
@@ -423,7 +418,8 @@ internal class Program
         LastResponse? lastResponse,
         ReadOnlySpan<byte> request,
         DateTimeOffset requestObservedAt,
-        TextWriter logWriter)
+        TextWriter logWriter,
+        int masterDelayThresholdMilliseconds)
     {
         if (lastResponse is null)
         {
@@ -431,7 +427,7 @@ internal class Program
         }
 
         double delayMilliseconds = (requestObservedAt - lastResponse.ObservedAt).TotalMilliseconds;
-        if (delayMilliseconds < MasterDelayThresholdMilliseconds)
+        if (delayMilliseconds < masterDelayThresholdMilliseconds)
         {
             return;
         }
@@ -484,7 +480,7 @@ internal class Program
         logWriter.WriteLine(line);
     }
 
-    private static void WriteSummary(string summaryFilePath)
+    private static void WriteSummary(string summaryFilePath, int masterDelayThresholdMilliseconds)
     {
         var errorRecords = captureRecords.Where(IsError).ToArray();
         var recordsByType = captureRecords
@@ -519,7 +515,7 @@ internal class Program
         report.AppendLine("RESPONSE_MISMATCH and RESPONSE_WITHOUT_REQUEST = CRC-valid protocol-sequence errors.");
         report.AppendLine("INCOMPLETE and TRUNCATED_BY_REQUEST = response data did not form a CRC-valid frame.");
         report.AppendLine("NO_RESPONSE = a new request arrived while the prior request was still awaiting a response.");
-        report.AppendLine($"MASTER_DELAY_AFTER_RESPONSE threshold: {MasterDelayThresholdMilliseconds} ms.");
+        report.AppendLine($"MASTER_DELAY_AFTER_RESPONSE threshold: {masterDelayThresholdMilliseconds} ms.");
         report.AppendLine();
         report.AppendLine("Records by type:");
         foreach (var group in recordsByType)
@@ -804,6 +800,77 @@ internal class Program
     [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetConsoleMode(nint consoleHandle, uint mode);
+
+    private sealed class ModbusSettings
+    {
+        public string PortName { get; private set; } = "COM7";
+        public int BaudRate { get; private set; } = 57600;
+        public Parity PortParity { get; private set; } = Parity.None;
+        public int DataBits { get; private set; } = 8;
+        public StopBits PortStopBits { get; private set; } = StopBits.One;
+        public Handshake PortHandshake { get; private set; } = Handshake.None;
+        public int PartialFrameTimeoutMilliseconds { get; private set; } = 100;
+        public int MasterDelayThresholdMilliseconds { get; private set; } = 400;
+
+        public static ModbusSettings Load(string filePath)
+        {
+            var settings = new ModbusSettings();
+            if (!File.Exists(filePath))
+            {
+                File.WriteAllLines(filePath,
+                [
+                    "PortName=COM7",
+                    "BaudRate=57600",
+                    "Parity=None",
+                    "DataBits=8",
+                    "StopBits=One",
+                    "Handshake=None",
+                    "PartialFrameTimeoutMilliseconds=100",
+                    "MasterDelayThresholdMilliseconds=400"
+                ]);
+                return settings;
+            }
+
+            foreach (string line in File.ReadLines(filePath))
+            {
+                string[] parts = line.Split('=', 2, StringSplitOptions.TrimEntries);
+                if (parts.Length != 2 || parts[0].Length == 0 || parts[0].StartsWith(';'))
+                {
+                    continue;
+                }
+
+                switch (parts[0])
+                {
+                    case "PortName":
+                        settings.PortName = parts[1];
+                        break;
+                    case "BaudRate":
+                        if (int.TryParse(parts[1], out int baudRate) && baudRate > 0) settings.BaudRate = baudRate;
+                        break;
+                    case "Parity":
+                        if (Enum.TryParse(parts[1], true, out Parity parity)) settings.PortParity = parity;
+                        break;
+                    case "DataBits":
+                        if (int.TryParse(parts[1], out int dataBits) && dataBits > 0) settings.DataBits = dataBits;
+                        break;
+                    case "StopBits":
+                        if (Enum.TryParse(parts[1], true, out StopBits stopBits)) settings.PortStopBits = stopBits;
+                        break;
+                    case "Handshake":
+                        if (Enum.TryParse(parts[1], true, out Handshake handshake)) settings.PortHandshake = handshake;
+                        break;
+                    case "PartialFrameTimeoutMilliseconds":
+                        if (int.TryParse(parts[1], out int partialTimeout) && partialTimeout > 0) settings.PartialFrameTimeoutMilliseconds = partialTimeout;
+                        break;
+                    case "MasterDelayThresholdMilliseconds":
+                        if (int.TryParse(parts[1], out int masterDelay) && masterDelay >= 0) settings.MasterDelayThresholdMilliseconds = masterDelay;
+                        break;
+                }
+            }
+
+            return settings;
+        }
+    }
 
     private sealed record PendingRequest(byte UnitAddress, byte FunctionCode, DateTimeOffset ObservedAt);
 

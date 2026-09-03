@@ -20,7 +20,9 @@ A .NET 8 console application for monitoring and analyzing Modbus RTU traffic on 
 
 ## Configuration
 
-Edit `PortName` in `Program.cs` to select the default serial port. The current default is `COM7`.
+Edit `ModbusSniffer.ini` to select the serial port and other settings. The default port is `COM7`.
+
+The INI file uses simple `property=value` lines. Lines beginning with `;` are comments.
 
 The serial settings are currently:
 
