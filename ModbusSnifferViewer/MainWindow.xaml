@@ -32,6 +32,9 @@
                 <CheckBox x:Name="ErrorsOnlyCheckBox" Content="Errors only" Margin="16,0,0,0" VerticalAlignment="Center" Checked="FilterChanged" Unchecked="FilterChanged" />
                 <TextBlock x:Name="CountText" Margin="20,0,0,0" VerticalAlignment="Center" Foreground="#52606D" />
             </StackPanel>
+            <GroupBox Header="Complete log" Margin="0,0,0,10" Padding="8">
+                <TextBlock x:Name="StatisticsText" TextWrapping="Wrap" Foreground="#334E68" />
+            </GroupBox>
         </StackPanel>
         <GroupBox DockPanel.Dock="Bottom" Header="Selected record" Margin="0,12,0,0" Padding="8">
             <TextBox x:Name="DetailsTextBox" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" MinHeight="80" Background="White" />

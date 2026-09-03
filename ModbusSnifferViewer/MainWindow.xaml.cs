@@ -55,12 +55,55 @@ public partial class MainWindow : System.Windows.Window
 
         FileText.Text = Path.GetFileName(filePath);
         viewSource.View.Refresh();
-        CountText.Text = $"{entries.Count:N0} records";
+        UpdateCounts();
+        UpdateStatistics(filePath);
     }
 
-    private void FilterTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => viewSource.View.Refresh();
+    private void FilterTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        viewSource.View.Refresh();
+        UpdateCounts();
+    }
 
-    private void FilterChanged(object sender, System.Windows.RoutedEventArgs e) => viewSource.View.Refresh();
+    private void FilterChanged(object sender, System.Windows.RoutedEventArgs e)
+    {
+        viewSource.View.Refresh();
+        UpdateCounts();
+    }
+
+    private void UpdateCounts()
+    {
+        int visibleCount = viewSource.View.Cast<LogEntry>().Count();
+        CountText.Text = visibleCount == entries.Count
+            ? $"{entries.Count:N0} records"
+            : $"{visibleCount:N0} of {entries.Count:N0} records";
+    }
+
+    private void UpdateStatistics(string filePath)
+    {
+        IEnumerable<double> responseTimes = entries
+            .Where(entry => entry.ResponseTimeMilliseconds.HasValue)
+            .Select(entry => entry.ResponseTimeMilliseconds!.Value);
+        int requests = entries.Count(entry => entry.Label == "REQUEST");
+        int matchedResponses = entries.Count(entry =>
+            entry.Label.StartsWith("MATCHED_RESPONSE", StringComparison.Ordinal) ||
+            entry.Label.StartsWith("MATCHED_EXCEPTION_RESPONSE", StringComparison.Ordinal));
+        int errors = entries.Count(entry => entry.IsError);
+        DateTimeOffset firstTimestamp = entries.Count == 0 ? default : entries.Min(entry => entry.Timestamp);
+        DateTimeOffset lastTimestamp = entries.Count == 0 ? default : entries.Max(entry => entry.Timestamp);
+        string timeRange = entries.Count == 0
+            ? "No timestamps"
+            : $"{firstTimestamp:yyyy-MM-dd HH:mm:ss.fff} to {lastTimestamp:yyyy-MM-dd HH:mm:ss.fff}";
+        string latency = responseTimes.Any()
+            ? $"response {responseTimes.Average():F1} ms avg / {responseTimes.Max():F1} ms max"
+            : "response latency n/a";
+        long fileSize = new FileInfo(filePath).Length;
+
+        StatisticsText.Text =
+            $"{entries.Count:N0} records | {requests:N0} requests | {matchedResponses:N0} matched responses | {errors:N0} errors | " +
+            $"{entries.Sum(entry => entry.Length):N0} frame bytes | max USB gap {entries.DefaultIfEmpty().Max(entry => entry?.MaximumGapMilliseconds ?? 0):F3} ms | " +
+            $"{latency} | {fileSize:N0} bytes\n{timeRange}";
+    }
 
     private void FilterEntries(object sender, FilterEventArgs e)
     {
