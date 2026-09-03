@@ -42,6 +42,14 @@ dotnet run --project ModbusSniffer.csproj
 
 Press `Ctrl+C` to stop a capture.
 
+## Build Release
+
+```text
+dotnet publish ModbusSniffer.csproj -c Release -o release
+```
+
+The Release configuration creates a self-contained, compressed single-file Windows x64 executable with its dependencies embedded.
+
 ## Output
 
 Session files are written to the `log` folder beside the application:
