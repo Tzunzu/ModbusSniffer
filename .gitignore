@@ -2,6 +2,7 @@
 bin/
 obj/
 release/
+*.zip
 
 # Visual Studio and VS Code local state
 .vs/
