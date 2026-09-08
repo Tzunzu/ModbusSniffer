@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ModbusSniffer", "ModbusSnif
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ModbusSnifferViewer", "ModbusSnifferViewer\ModbusSnifferViewer.csproj", "{B9659AD9-1F72-4244-A4A1-0629691E65BB}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ModbusSniffer.Tests", "ModbusSniffer.Tests\ModbusSniffer.Tests.csproj", "{3287333B-AB1B-4D07-8ED0-10BE063B35CE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -24,5 +26,9 @@ Global
 		{B9659AD9-1F72-4244-A4A1-0629691E65BB}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B9659AD9-1F72-4244-A4A1-0629691E65BB}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B9659AD9-1F72-4244-A4A1-0629691E65BB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3287333B-AB1B-4D07-8ED0-10BE063B35CE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3287333B-AB1B-4D07-8ED0-10BE063B35CE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3287333B-AB1B-4D07-8ED0-10BE063B35CE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3287333B-AB1B-4D07-8ED0-10BE063B35CE}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

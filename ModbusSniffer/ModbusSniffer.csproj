@@ -22,6 +22,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="ModbusSniffer.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="ModbusSniffer.ini" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 

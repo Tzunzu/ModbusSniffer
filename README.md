@@ -11,6 +11,7 @@ A .NET 8 console application for monitoring and analyzing Modbus RTU traffic on 
 - Reports missing responses, mismatches, and master delays.
 - Lists available COM ports with Windows device names when the configured port cannot be opened.
 - Holds the port open for the whole session and keeps RTS/DTR in a fixed state, so Windows does not misdetect bus traffic as a serial mouse.
+- Writes the log and console output on a background thread so disk latency does not distort the capture timing.
 - Creates a new timestamped log and summary for every session.
 
 ## Requirements
@@ -61,6 +62,16 @@ dotnet run --project ModbusSniffer/ModbusSniffer.csproj
 ```
 
 Press `Ctrl+C` to stop a capture.
+
+## Tests
+
+```text
+dotnet test
+```
+
+`ModbusSniffer.Tests` covers the frame-classification heuristics (direction
+detection, CRC validation, frame extraction, and request resynchronisation)
+using real captured frames.
 
 ## Build Release
 

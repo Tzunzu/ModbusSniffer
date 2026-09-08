@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Ports;
 using System.Runtime.InteropServices;
@@ -30,8 +31,11 @@ internal class Program
         Directory.CreateDirectory(logDirectoryPath);
         string logFilePath = Path.Combine(logDirectoryPath, $"{LogFilePrefix}{sessionStartedAt:yyyy-MM-dd_HH-mm-ss}.log");
         string summaryFilePath = Path.Combine(logDirectoryPath, $"{SummaryFilePrefix}{sessionStartedAt:yyyy-MM-dd_HH-mm-ss}.txt");
-        using var logWriter = new StreamWriter(logFilePath, append: false) { AutoFlush = true };
 
+        // Disposal order is the reverse of declaration: the capture loop stops,
+        // the summary is written from the in-memory records, then the log queue
+        // is drained and the file closed last.
+        using var log = new CaptureLog(logFilePath);
         using var serialPort = CreateSerialPort(settings);
         using var cancellationSource = new CancellationTokenSource();
         Console.CancelKeyPress += (_, eventArgs) =>
@@ -48,8 +52,8 @@ internal class Program
         try
         {
             PrintCaptureBanner(serialPort, logFilePath, summaryFilePath);
-            RunCaptureLoop(serialPort, logWriter, settings, cancellationSource.Token);
-            Console.WriteLine("Stopped.");
+            RunCaptureLoop(serialPort, log, settings, cancellationSource.Token);
+            log.WriteConsole("Stopped.");
             return 0;
         }
         finally
@@ -119,7 +123,7 @@ internal class Program
 
     private static void RunCaptureLoop(
         SerialPort serialPort,
-        TextWriter logWriter,
+        CaptureLog log,
         ModbusSettings settings,
         CancellationToken cancellationToken)
     {
@@ -137,11 +141,11 @@ internal class Program
             {
                 int bytesRead = serialPort.Read(buffer, 0, buffer.Length);
                 UsbTransmission usbTransmission = CreateUsbTransmission(++usbTransmissionNumber, bytesRead, ref previousUsbTransmissionTimestamp);
-                ProcessReceivedBytes(receivedBytes, buffer.AsSpan(0, bytesRead), logWriter, ref pendingRequest, ref lastResponse, usbTransmission, frameTransport, settings.MasterDelayThresholdMilliseconds);
+                ProcessReceivedBytes(receivedBytes, buffer.AsSpan(0, bytesRead), log, ref pendingRequest, ref lastResponse, usbTransmission, frameTransport, settings.MasterDelayThresholdMilliseconds);
             }
             catch (TimeoutException)
             {
-                PrintIncompleteBytes(receivedBytes, logWriter, frameTransport);
+                PrintIncompleteBytes(receivedBytes, log, frameTransport);
             }
             catch (IOException exception)
             {
@@ -200,7 +204,7 @@ internal class Program
     private static void ProcessReceivedBytes(
         List<byte> receivedBytes,
         ReadOnlySpan<byte> bytes,
-        TextWriter logWriter,
+        CaptureLog log,
         ref PendingRequest? pendingRequest,
         ref LastResponse? lastResponse,
         UsbTransmission usbTransmission,
@@ -221,11 +225,11 @@ internal class Program
                 {
                     if (pendingRequest is not null)
                     {
-                        PrintNoResponse(pendingRequest, observedAt, logWriter);
+                        PrintNoResponse(pendingRequest, observedAt, log);
                     }
                     else
                     {
-                        PrintMasterDelayIfNeeded(lastResponse, frame, observedAt, logWriter, masterDelayThresholdMilliseconds);
+                        PrintMasterDelayIfNeeded(lastResponse, frame, observedAt, log, masterDelayThresholdMilliseconds);
                     }
 
                     pendingRequest = new PendingRequest(frame[0], frame[1], observedAt);
@@ -236,7 +240,7 @@ internal class Program
                     lastResponse = new LastResponse(frame[0], (byte)(frame[1] & 0x7F), observedAt);
                 }
 
-                PrintFrame(label, frame, logWriter, frameTransport, includeModbusHeader: true, responseTimeMilliseconds);
+                PrintFrame(label, frame, log, frameTransport, includeModbusHeader: true, responseTimeMilliseconds);
                 frameTransport.Reset();
                 continue;
             }
@@ -247,7 +251,7 @@ internal class Program
             }
 
             frameTransport.Add(usbTransmission);
-            PrintFrame("TRUNCATED_BY_REQUEST", CollectionsMarshal.AsSpan(receivedBytes)[..requestStart], logWriter, frameTransport);
+            PrintFrame("TRUNCATED_BY_REQUEST", CollectionsMarshal.AsSpan(receivedBytes)[..requestStart], log, frameTransport);
             receivedBytes.RemoveRange(0, requestStart);
             frameTransport.Reset();
         }
@@ -258,7 +262,7 @@ internal class Program
         }
     }
 
-    private static bool TryFindNextRequestStart(List<byte> receivedBytes, out int requestStart)
+    internal static bool TryFindNextRequestStart(List<byte> receivedBytes, out int requestStart)
     {
         for (int index = 1; index < receivedBytes.Count - 1; index++)
         {
@@ -281,7 +285,7 @@ internal class Program
         return false;
     }
 
-    private static bool TryExtractModbusFrame(List<byte> receivedBytes, out byte[]? frame)
+    internal static bool TryExtractModbusFrame(List<byte> receivedBytes, out byte[]? frame)
     {
         frame = null;
         if (receivedBytes.Count < 2)
@@ -302,7 +306,7 @@ internal class Program
         return false;
     }
 
-    private static IEnumerable<int> GetPossibleFrameLengths(IReadOnlyList<byte> bytes)
+    internal static IEnumerable<int> GetPossibleFrameLengths(IReadOnlyList<byte> bytes)
     {
         byte functionCode = bytes[1];
         if ((functionCode & 0x80) != 0)
@@ -360,7 +364,7 @@ internal class Program
         }
     }
 
-    private static bool HasValidModbusCrc(IReadOnlyList<byte> bytes, int frameLength)
+    internal static bool HasValidModbusCrc(IReadOnlyList<byte> bytes, int frameLength)
     {
         ushort crc = 0xFFFF;
         for (int index = 0; index < frameLength - 2; index++)
@@ -375,14 +379,14 @@ internal class Program
         return bytes[frameLength - 2] == (byte)crc && bytes[frameLength - 1] == (byte)(crc >> 8);
     }
 
-    private static void PrintIncompleteBytes(List<byte> receivedBytes, TextWriter logWriter, FrameTransport frameTransport)
+    private static void PrintIncompleteBytes(List<byte> receivedBytes, CaptureLog log, FrameTransport frameTransport)
     {
         if (receivedBytes.Count == 0)
         {
             return;
         }
 
-        PrintFrame("INCOMPLETE", CollectionsMarshal.AsSpan(receivedBytes), logWriter, frameTransport);
+        PrintFrame("INCOMPLETE", CollectionsMarshal.AsSpan(receivedBytes), log, frameTransport);
         receivedBytes.Clear();
         frameTransport.Reset();
     }
@@ -390,7 +394,7 @@ internal class Program
     private static void PrintFrame(
         string label,
         ReadOnlySpan<byte> bytes,
-        TextWriter logWriter,
+        CaptureLog log,
         FrameTransport frameTransport,
         bool includeModbusHeader = false,
         double? responseTimeMilliseconds = null,
@@ -406,7 +410,6 @@ internal class Program
             line.Append($"{value:X2} ");
         }
 
-        Console.WriteLine(line);
         var captureRecord = new CaptureRecord(
             DateTimeOffset.UtcNow,
             label,
@@ -421,14 +424,14 @@ internal class Program
             masterDelayMilliseconds,
             Convert.ToHexString(bytes));
         captureRecords.Add(captureRecord);
-        logWriter.WriteLine(JsonSerializer.Serialize(captureRecord));
+        log.Write(line.ToString(), JsonSerializer.Serialize(captureRecord));
     }
 
     private static void PrintMasterDelayIfNeeded(
         LastResponse? lastResponse,
         ReadOnlySpan<byte> request,
         DateTimeOffset requestObservedAt,
-        TextWriter logWriter,
+        CaptureLog log,
         int masterDelayThresholdMilliseconds)
     {
         if (lastResponse is null)
@@ -444,7 +447,6 @@ internal class Program
 
         string label = $"MASTER_DELAY_AFTER_RESPONSE {delayMilliseconds:F1}ms response={lastResponse.UnitAddress:X2}/0x{lastResponse.FunctionCode:X2}";
         string line = $"[{label} nextRequest={request[0]:X2}/0x{request[1]:X2}]";
-        Console.WriteLine(line);
 
         var captureRecord = new CaptureRecord(
             requestObservedAt,
@@ -460,18 +462,17 @@ internal class Program
             delayMilliseconds,
             string.Empty);
         captureRecords.Add(captureRecord);
-        logWriter.WriteLine(JsonSerializer.Serialize(captureRecord));
+        log.Write(line, JsonSerializer.Serialize(captureRecord));
     }
 
     private static void PrintNoResponse(
         PendingRequest pendingRequest,
         DateTimeOffset nextRequestObservedAt,
-        TextWriter logWriter)
+        CaptureLog log)
     {
         double waitMilliseconds = (nextRequestObservedAt - pendingRequest.ObservedAt).TotalMilliseconds;
         string label = $"NO_RESPONSE {waitMilliseconds:F1}ms expected={pendingRequest.UnitAddress:X2}/0x{pendingRequest.FunctionCode:X2}";
         string line = $"{nextRequestObservedAt:O} {label}";
-        Console.WriteLine(line);
 
         var captureRecord = new CaptureRecord(
             nextRequestObservedAt,
@@ -487,7 +488,7 @@ internal class Program
             null,
             string.Empty);
         captureRecords.Add(captureRecord);
-        logWriter.WriteLine(line);
+        log.Write(line, JsonSerializer.Serialize(captureRecord));
     }
 
     private static void WriteSummary(string summaryFilePath, int masterDelayThresholdMilliseconds)
@@ -581,7 +582,7 @@ internal class Program
             ? address
             : null);
 
-    private static string GetModbusDirection(ReadOnlySpan<byte> frame)
+    internal static string GetModbusDirection(ReadOnlySpan<byte> frame)
     {
         if (frame.Length < 2)
         {
@@ -810,6 +811,98 @@ internal class Program
     [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetConsoleMode(nint consoleHandle, uint mode);
+
+    // Serial reads and USB-gap timing run on the capture thread. File and console
+    // writes are handed to this queue and performed on a background thread so a
+    // slow disk or console cannot stall the read loop and inflate the very gap
+    // measurements the tool exists to record.
+    private sealed class CaptureLog : IDisposable
+    {
+        private const int FlushIntervalMilliseconds = 250;
+
+        private readonly StreamWriter writer;
+        private readonly TextWriter console;
+        private readonly BlockingCollection<Line> queue = new();
+        private readonly Thread worker;
+        private Exception? workerFault;
+        private bool disposed;
+
+        public CaptureLog(string logFilePath)
+        {
+            writer = new StreamWriter(logFilePath, append: false);
+            console = Console.Out;
+            worker = new Thread(Drain)
+            {
+                IsBackground = true,
+                Name = "capture-log-writer"
+            };
+            worker.Start();
+        }
+
+        public void Write(string consoleLine, string logLine) => Enqueue(new Line(consoleLine, logLine));
+
+        public void WriteConsole(string consoleLine) => Enqueue(new Line(consoleLine, null));
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+            queue.CompleteAdding();
+            worker.Join();
+            writer.Dispose();
+            queue.Dispose();
+            if (workerFault is not null)
+            {
+                Console.Error.WriteLine($"Log writer stopped after an error: {workerFault.Message}");
+            }
+        }
+
+        private void Enqueue(Line line)
+        {
+            if (!queue.IsAddingCompleted)
+            {
+                queue.Add(line);
+            }
+        }
+
+        private void Drain()
+        {
+            try
+            {
+                var sinceFlush = Stopwatch.StartNew();
+                foreach (Line line in queue.GetConsumingEnumerable())
+                {
+                    if (line.ConsoleLine is not null)
+                    {
+                        console.WriteLine(line.ConsoleLine);
+                    }
+
+                    if (line.LogLine is not null)
+                    {
+                        writer.WriteLine(line.LogLine);
+                    }
+
+                    if (queue.Count == 0 || sinceFlush.ElapsedMilliseconds >= FlushIntervalMilliseconds)
+                    {
+                        writer.Flush();
+                        sinceFlush.Restart();
+                    }
+                }
+
+                writer.Flush();
+            }
+            catch (Exception exception)
+            {
+                workerFault = exception;
+            }
+        }
+
+        private readonly record struct Line(string? ConsoleLine, string? LogLine);
+    }
 
     private sealed class ModbusSettings
     {
