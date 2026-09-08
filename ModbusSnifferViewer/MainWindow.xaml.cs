@@ -10,6 +10,8 @@ public partial class MainWindow : System.Windows.Window
 {
     private readonly ObservableCollection<LogEntry> entries = [];
     private readonly CollectionViewSource viewSource = new();
+    private string lastSearch = string.Empty;
+    private int nextSearchIndex;
 
     public MainWindow()
     {
@@ -44,6 +46,8 @@ public partial class MainWindow : System.Windows.Window
     private void LoadLog(string filePath)
     {
         entries.Clear();
+        lastSearch = string.Empty;
+        nextSearchIndex = 0;
         foreach (string line in File.ReadLines(filePath))
         {
             LogEntry? entry = LogEntry.Parse(line);
@@ -59,16 +63,62 @@ public partial class MainWindow : System.Windows.Window
         UpdateStatistics(filePath);
     }
 
-    private void FilterTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    private void FindNext_Click(object sender, System.Windows.RoutedEventArgs e)
     {
-        viewSource.View.Refresh();
-        UpdateCounts();
+        FindNext();
+    }
+
+    private void SearchTextBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Enter)
+        {
+            FindNext();
+            e.Handled = true;
+        }
+    }
+
+    private void FindNext()
+    {
+        string search = SearchTextBox.Text.Trim();
+        if (search.Length == 0)
+        {
+            return;
+        }
+
+        if (!string.Equals(search, lastSearch, StringComparison.OrdinalIgnoreCase))
+        {
+            lastSearch = search;
+            nextSearchIndex = 0;
+        }
+
+        List<LogEntry> visibleEntries = viewSource.View.Cast<LogEntry>().ToList();
+        if (visibleEntries.Count == 0)
+        {
+            return;
+        }
+
+        for (int offset = 0; offset < visibleEntries.Count; offset++)
+        {
+            int index = (nextSearchIndex + offset) % visibleEntries.Count;
+            if (!visibleEntries[index].SearchText.Contains(search, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            LogGrid.SelectedItem = visibleEntries[index];
+            LogGrid.ScrollIntoView(visibleEntries[index]);
+            nextSearchIndex = (index + 1) % visibleEntries.Count;
+            return;
+        }
+
+        nextSearchIndex = 0;
     }
 
     private void FilterChanged(object sender, System.Windows.RoutedEventArgs e)
     {
         viewSource.View.Refresh();
         UpdateCounts();
+        nextSearchIndex = 0;
     }
 
     private void UpdateCounts()
@@ -81,28 +131,141 @@ public partial class MainWindow : System.Windows.Window
 
     private void UpdateStatistics(string filePath)
     {
-        IEnumerable<double> responseTimes = entries
-            .Where(entry => entry.ResponseTimeMilliseconds.HasValue)
-            .Select(entry => entry.ResponseTimeMilliseconds!.Value);
-        int requests = entries.Count(entry => entry.Label == "REQUEST");
-        int matchedResponses = entries.Count(entry =>
-            entry.Label.StartsWith("MATCHED_RESPONSE", StringComparison.Ordinal) ||
-            entry.Label.StartsWith("MATCHED_EXCEPTION_RESPONSE", StringComparison.Ordinal));
-        int errors = entries.Count(entry => entry.IsError);
-        DateTimeOffset firstTimestamp = entries.Count == 0 ? default : entries.Min(entry => entry.Timestamp);
-        DateTimeOffset lastTimestamp = entries.Count == 0 ? default : entries.Max(entry => entry.Timestamp);
-        string timeRange = entries.Count == 0
-            ? "No timestamps"
-            : $"{firstTimestamp:yyyy-MM-dd HH:mm:ss.fff} to {lastTimestamp:yyyy-MM-dd HH:mm:ss.fff}";
-        string latency = responseTimes.Any()
-            ? $"response {responseTimes.Average():F1} ms avg / {responseTimes.Max():F1} ms max"
-            : "response latency n/a";
         long fileSize = new FileInfo(filePath).Length;
+        if (entries.Count == 0)
+        {
+            OverviewText.Text = "No records";
+            TrafficText.Text = string.Empty;
+            ErrorsText.Text = string.Empty;
+            TimingText.Text = string.Empty;
+            return;
+        }
 
-        StatisticsText.Text =
-            $"{entries.Count:N0} records | {requests:N0} requests | {matchedResponses:N0} matched responses | {errors:N0} errors | " +
-            $"{entries.Sum(entry => entry.Length):N0} frame bytes | max USB gap {entries.DefaultIfEmpty().Max(entry => entry?.MaximumGapMilliseconds ?? 0):F3} ms | " +
-            $"{latency} | {fileSize:N0} bytes\n{timeRange}";
+        DateTimeOffset firstTimestamp = entries.Min(entry => entry.Timestamp);
+        DateTimeOffset lastTimestamp = entries.Max(entry => entry.Timestamp);
+        TimeSpan span = lastTimestamp - firstTimestamp;
+        long frameBytes = entries.Sum(entry => (long)entry.Length);
+
+        OverviewText.Text = string.Join('\n',
+            $"{entries.Count:N0} records",
+            $"{frameBytes:N0} frame bytes",
+            $"{fileSize:N0} bytes on disk",
+            $"span {FormatDuration(span)}",
+            span.TotalSeconds > 0 ? $"{entries.Count / span.TotalSeconds:N1} records/s" : "rate n/a",
+            $"first {firstTimestamp:yyyy-MM-dd HH:mm:ss.fff}",
+            $"last  {lastTimestamp:yyyy-MM-dd HH:mm:ss.fff}");
+
+        List<IGrouping<string, LogEntry>> byType = entries
+            .GroupBy(entry => entry.Type)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
+            .ToList();
+        var traffic = new System.Text.StringBuilder();
+        foreach (IGrouping<string, LogEntry> group in byType)
+        {
+            traffic.AppendLine($"{group.Key,-26} {group.Count(),6} {100d * group.Count() / entries.Count,5:F1}%");
+        }
+
+        var byAddress = entries
+            .Where(entry => entry.Address.Length > 0)
+            .GroupBy(entry => entry.Address)
+            .Select(group => new
+            {
+                Address = group.Key,
+                Total = group.Count(),
+                Errors = group.Count(entry => entry.IsError)
+            })
+            .OrderByDescending(item => item.Errors)
+            .ThenBy(item => item.Address, StringComparer.Ordinal)
+            .ToList();
+        if (byAddress.Count > 0)
+        {
+            traffic.AppendLine();
+            traffic.AppendLine($"{"Address",-10} {"Records",7} {"Errors",7}");
+            foreach (var address in byAddress)
+            {
+                traffic.AppendLine($"{address.Address,-10} {address.Total,7} {address.Errors,7}");
+            }
+        }
+
+        TrafficText.Text = traffic.ToString().TrimEnd();
+
+        int errorCount = entries.Count(entry => entry.IsError);
+        if (errorCount == 0)
+        {
+            ErrorsText.Text = "No errors";
+        }
+        else
+        {
+            var errors = new System.Text.StringBuilder();
+            errors.AppendLine($"{errorCount:N0} errors  {100d * errorCount / entries.Count:F2}% of records");
+            errors.AppendLine();
+            foreach (IGrouping<string, LogEntry> group in entries
+                .Where(entry => entry.IsError)
+                .GroupBy(entry => entry.Type)
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key, StringComparer.Ordinal))
+            {
+                errors.AppendLine($"{group.Key,-26} {group.Count(),6}");
+            }
+
+            ErrorsText.Text = errors.ToString().TrimEnd();
+        }
+
+        List<double> responseTimes = entries
+            .Where(entry => entry.ResponseTimeMilliseconds.HasValue)
+            .Select(entry => entry.ResponseTimeMilliseconds!.Value)
+            .OrderBy(value => value)
+            .ToList();
+        int requests = entries.Count(entry => entry.Type == "REQUEST");
+        int matchedResponses = entries.Count(entry =>
+            entry.Type is "MATCHED_RESPONSE" or "MATCHED_EXCEPTION_RESPONSE");
+        int noResponse = entries.Count(entry => entry.Type == "NO_RESPONSE");
+        List<double> masterDelays = entries
+            .Where(entry => entry.MasterDelayMilliseconds.HasValue)
+            .Select(entry => entry.MasterDelayMilliseconds!.Value)
+            .ToList();
+        double maxUsbGap = entries.Max(entry => entry.MaximumGapMilliseconds);
+        int splitFrames = entries.Count(entry => entry.UsbTransmissionCount > 1);
+
+        var timing = new List<string>
+        {
+            $"{requests:N0} requests / {matchedResponses:N0} matched",
+            noResponse > 0 ? $"{noResponse:N0} requests unanswered" : "all requests answered",
+            responseTimes.Count > 0
+                ? $"response ms  avg {responseTimes.Average():F1}  p50 {Percentile(responseTimes, 50):F1}  p95 {Percentile(responseTimes, 95):F1}  max {responseTimes[^1]:F1}"
+                : "response latency n/a",
+            $"max USB intra-frame gap {maxUsbGap:F3} ms",
+            $"{splitFrames:N0} frames split across USB reads"
+        };
+        if (masterDelays.Count > 0)
+        {
+            timing.Add($"{masterDelays.Count:N0} master delays  max {masterDelays.Max():F0} ms");
+        }
+
+        TimingText.Text = string.Join('\n', timing);
+    }
+
+    private static string FormatDuration(TimeSpan duration) =>
+        duration.TotalHours >= 1
+            ? $"{(int)duration.TotalHours}h {duration.Minutes}m {duration.Seconds}s"
+            : duration.TotalMinutes >= 1
+                ? $"{duration.Minutes}m {duration.Seconds}s"
+                : $"{duration.TotalSeconds:F1}s";
+
+    private static double Percentile(List<double> sortedValues, double percentile)
+    {
+        if (sortedValues.Count == 0)
+        {
+            return 0;
+        }
+
+        double rank = percentile / 100d * (sortedValues.Count - 1);
+        int low = (int)Math.Floor(rank);
+        int high = (int)Math.Ceiling(rank);
+        return low == high
+            ? sortedValues[low]
+            : sortedValues[low] + ((rank - low) * (sortedValues[high] - sortedValues[low]));
     }
 
     private void FilterEntries(object sender, FilterEventArgs e)
@@ -113,9 +276,7 @@ public partial class MainWindow : System.Windows.Window
             return;
         }
 
-        string filter = FilterTextBox?.Text.Trim() ?? string.Empty;
-        e.Accepted = (!ErrorsOnlyCheckBox.IsChecked.GetValueOrDefault() || entry.IsError) &&
-            (filter.Length == 0 || entry.SearchText.Contains(filter, StringComparison.OrdinalIgnoreCase));
+        e.Accepted = !ErrorsOnlyCheckBox.IsChecked.GetValueOrDefault() || entry.IsError;
     }
 
     private void LogGrid_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
@@ -131,11 +292,24 @@ public partial class MainWindow : System.Windows.Window
         public string Function { get; init; } = string.Empty;
         public int Length { get; init; }
         public string UsbTransmissions { get; init; } = string.Empty;
+        public int UsbTransmissionCount { get; init; }
         public double? ResponseTimeMilliseconds { get; init; }
+        public double? MasterDelayMilliseconds { get; init; }
         public double MaximumGapMilliseconds { get; init; }
         public bool IsError { get; init; }
         public string Details { get; init; } = string.Empty;
-        public string SearchText => $"{Label} {Address} {Function} {Details}";
+        public string SearchText => $"{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Label} {Address} {Function} {Length} {UsbTransmissions} {ResponseTimeMilliseconds} {MaximumGapMilliseconds} {Details}";
+
+        public string Type =>
+            Label.StartsWith("MATCHED_EXCEPTION", StringComparison.Ordinal) ? "MATCHED_EXCEPTION_RESPONSE" :
+            Label.StartsWith("MATCHED_RESPONSE", StringComparison.Ordinal) ? "MATCHED_RESPONSE" :
+            Label.StartsWith("MASTER_DELAY_AFTER_RESPONSE", StringComparison.Ordinal) ? "MASTER_DELAY_AFTER_RESPONSE" :
+            Label.StartsWith("NO_RESPONSE", StringComparison.Ordinal) ? "NO_RESPONSE" :
+            Label.StartsWith("RESPONSE_MISMATCH", StringComparison.Ordinal) ? "RESPONSE_MISMATCH" :
+            Label.StartsWith("RESPONSE_WITHOUT_REQUEST", StringComparison.Ordinal) ? "RESPONSE_WITHOUT_REQUEST" :
+            Label.StartsWith("TRUNCATED", StringComparison.Ordinal) ? "TRUNCATED_BY_REQUEST" :
+            Label.StartsWith("INCOMPLETE", StringComparison.Ordinal) ? "INCOMPLETE" :
+            Label.IndexOf(' ') is int space and > 0 ? Label[..space] : Label;
 
         public static LogEntry? Parse(string line)
         {
@@ -160,7 +334,9 @@ public partial class MainWindow : System.Windows.Window
                     Function = FormatByte(root, "Function"),
                     Length = root.GetProperty("Length").GetInt32(),
                     UsbTransmissions = count == 0 ? string.Empty : $"#{first}-#{last} ({count})",
+                    UsbTransmissionCount = count,
                     ResponseTimeMilliseconds = GetNullableDouble(root, "ResponseTimeMilliseconds"),
+                    MasterDelayMilliseconds = GetNullableDouble(root, "MasterDelayMilliseconds"),
                     MaximumGapMilliseconds = root.GetProperty("MaximumGapMilliseconds").GetDouble(),
                     IsError = IsErrorLabel(label),
                     Details = root.TryGetProperty("Hex", out JsonElement hex) ? hex.GetString() ?? string.Empty : line

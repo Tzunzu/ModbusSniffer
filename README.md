@@ -10,6 +10,7 @@ A .NET 8 console application for monitoring and analyzing Modbus RTU traffic on 
 - Matches responses to requests and reports response timing.
 - Reports missing responses, mismatches, and master delays.
 - Lists available COM ports with Windows device names when the configured port cannot be opened.
+- Holds the port open for the whole session and keeps RTS/DTR in a fixed state, so Windows does not misdetect bus traffic as a serial mouse.
 - Creates a new timestamped log and summary for every session.
 
 ## Requirements
@@ -31,10 +32,27 @@ The serial settings are currently:
 - Parity: `None`
 - Stop bits: `1`
 - Handshake: `None`
+- `DtrEnable`: `false`
+- `RtsEnable`: `false`
 
-If the configured port cannot be opened, the program displays available ports and lets you select another port by number or name.
+`DtrEnable` and `RtsEnable` set the control-line state that is held for the whole
+session. Keep `RtsEnable=false` so the passive tap never keys the RS-485 driver.
+Leave `DtrEnable=false` unless your adapter needs DTR asserted.
+
+If the configured port cannot be opened, the program lists the available ports and exits. Set `PortName` in `ModbusSniffer.ini` to one of them and run again.
 
 For lower USB latency, set the adapter's latency timer to `1 ms` in its driver settings.
+
+### Jumping mouse pointer
+
+While a COM port is closed, Windows sniffs it for a legacy serial mouse and can
+attach a phantom "Microsoft Serial Ballpoint" when bus bytes match the mouse
+pattern, which makes the real pointer jump and click. To avoid it:
+
+- Leave ModbusSniffer running for the entire capture; it holds the port open.
+- If it still happens, open Device Manager, expand **Ports (COM & LPT)**, open the
+  adapter's properties, and under **Port Settings, Advanced** turn off
+  **Serial Enumerator**.
 
 ## Run
 

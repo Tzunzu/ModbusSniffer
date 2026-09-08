@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO.Ports;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -15,6 +15,7 @@ internal class Program
     private const string SummaryFilePrefix = "ModbusSniffer.summary_";
     private const int StandardOutputHandle = -11;
     private const uint EnableWrapAtEndOfLineOutput = 0x0002;
+    private const int ReadBufferSize = 4096;
     private static readonly List<CaptureRecord> captureRecords = [];
 
     private static int Main()
@@ -22,6 +23,7 @@ internal class Program
         ConfigureConsoleBuffer();
         DisableConsoleWrapping();
         captureRecords.Clear();
+
         ModbusSettings settings = ModbusSettings.Load(Path.Combine(AppContext.BaseDirectory, ConfigurationFileName));
         DateTimeOffset sessionStartedAt = DateTimeOffset.Now;
         string logDirectoryPath = Path.Combine(AppContext.BaseDirectory, LogDirectoryName);
@@ -30,12 +32,7 @@ internal class Program
         string summaryFilePath = Path.Combine(logDirectoryPath, $"{SummaryFilePrefix}{sessionStartedAt:yyyy-MM-dd_HH-mm-ss}.txt");
         using var logWriter = new StreamWriter(logFilePath, append: false) { AutoFlush = true };
 
-        using var serialPort = new SerialPort(settings.PortName, settings.BaudRate, settings.PortParity, settings.DataBits, settings.PortStopBits)
-        {
-            Handshake = settings.PortHandshake,
-            ReadTimeout = settings.PartialFrameTimeoutMilliseconds
-        };
-
+        using var serialPort = CreateSerialPort(settings);
         using var cancellationSource = new CancellationTokenSource();
         Console.CancelKeyPress += (_, eventArgs) =>
         {
@@ -43,63 +40,17 @@ internal class Program
             cancellationSource.Cancel();
         };
 
+        if (!TryOpenSerialPort(serialPort))
+        {
+            return 2;
+        }
+
         try
         {
-            if (!TryOpenSerialPort(serialPort))
-            {
-                return 2;
-            }
-
-            Console.WriteLine($"Listening on {serialPort.PortName} at {serialPort.BaudRate} baud. Press Ctrl+C to stop.");
-            Console.WriteLine("For lower USB latency, set the adapter latency timer to 1 ms.");
-            Console.WriteLine("Frames are marked REQUEST, RESPONSE, or AMBIGUOUS when Modbus layouts overlap.");
-            Console.WriteLine($"Logging to {logFilePath}");
-            Console.WriteLine($"Summary will be written to {summaryFilePath}");
-
-            byte[] buffer = new byte[4096];
-            var receivedBytes = new List<byte>();
-            PendingRequest? pendingRequest = null;
-            LastResponse? lastResponse = null;
-            long usbTransmissionNumber = 0;
-            long previousUsbTransmissionTimestamp = 0;
-            var frameTransport = new FrameTransport();
-            while (!cancellationSource.IsCancellationRequested)
-            {
-                try
-                {
-                    int bytesRead = serialPort.Read(buffer, 0, buffer.Length);
-                    UsbTransmission usbTransmission = CreateUsbTransmission(++usbTransmissionNumber, bytesRead, ref previousUsbTransmissionTimestamp);
-                    ProcessReceivedBytes(receivedBytes, buffer.AsSpan(0, bytesRead), logWriter, ref pendingRequest, ref lastResponse, usbTransmission, frameTransport, settings.MasterDelayThresholdMilliseconds);
-                }
-                catch (TimeoutException)
-                {
-                    PrintIncompleteBytes(receivedBytes, logWriter, frameTransport);
-                }
-                catch (OperationCanceledException) when (cancellationSource.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (OperationCanceledException exception)
-                {
-                    Console.Error.WriteLine($"Serial read canceled on {serialPort.PortName} (port open: {serialPort.IsOpen}): {exception.Message}");
-                    return 3;
-                }
-            }
-
+            PrintCaptureBanner(serialPort, logFilePath, summaryFilePath);
+            RunCaptureLoop(serialPort, logWriter, settings, cancellationSource.Token);
             Console.WriteLine("Stopped.");
             return 0;
-        }
-        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or ArgumentException)
-        {
-            Console.Error.WriteLine($"Could not open {serialPort.PortName}: {exception.Message}");
-            PrintAvailablePorts();
-            Console.WriteLine("Press any key to close.");
-            if (!Console.IsInputRedirected)
-            {
-                Console.ReadKey(intercept: true);
-            }
-
-            return 2;
         }
         finally
         {
@@ -112,42 +63,104 @@ internal class Program
         }
     }
 
+    // A passive tap must hold the port open for the whole session. Every moment
+    // the port is closed while the bus is active, Windows' serial enumerator can
+    // mistake Modbus bytes for a serial mouse, attach a phantom "Microsoft Serial
+    // Ballpoint", and send the real pointer jumping. Open() also drives DTR and
+    // RTS to match the flags below, so they are set explicitly rather than left
+    // to defaults.
+    private static SerialPort CreateSerialPort(ModbusSettings settings) =>
+        new(settings.PortName, settings.BaudRate, settings.PortParity, settings.DataBits, settings.PortStopBits)
+        {
+            Handshake = settings.PortHandshake,
+            ReadTimeout = settings.PartialFrameTimeoutMilliseconds,
+
+            // Keep RTS deasserted so the adapter never keys the RS-485 driver.
+            RtsEnable = settings.RtsEnable,
+
+            // DTR follows the INI (deasserted by default). Some USB adapters reset
+            // on a DTR edge, so it is left configurable for unusual hardware.
+            DtrEnable = settings.DtrEnable,
+        };
+
     private static bool TryOpenSerialPort(SerialPort serialPort)
     {
-        while (true)
+        try
+        {
+            serialPort.Open();
+
+            // Drop whatever the enumerator or earlier noise left buffered so the
+            // first frame we parse starts on a clean boundary.
+            serialPort.DiscardInBuffer();
+            return true;
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or ArgumentException)
+        {
+            Console.Error.WriteLine($"Could not open {serialPort.PortName}: {exception.Message}");
+            PrintAvailablePorts();
+            Console.WriteLine($"Set PortName in {ConfigurationFileName} to one of the ports listed above, then run again.");
+            WaitForKeyIfInteractive();
+            return false;
+        }
+    }
+
+    private static void PrintCaptureBanner(SerialPort serialPort, string logFilePath, string summaryFilePath)
+    {
+        Console.WriteLine($"Listening on {serialPort.PortName} at {serialPort.BaudRate} baud. Press Ctrl+C to stop.");
+        Console.WriteLine("Leave this program running for the whole capture. While the port is closed,");
+        Console.WriteLine("Windows can misread bus traffic as a serial mouse and make the pointer jump.");
+        Console.WriteLine("If that still happens, turn off \"Serial Enumerator\" in Device Manager under");
+        Console.WriteLine("the port's Port Settings, Advanced.");
+        Console.WriteLine("For lower USB latency, set the adapter latency timer to 1 ms.");
+        Console.WriteLine("Frames are marked REQUEST, RESPONSE, or AMBIGUOUS when Modbus layouts overlap.");
+        Console.WriteLine($"Logging to {logFilePath}");
+        Console.WriteLine($"Summary will be written to {summaryFilePath}");
+    }
+
+    private static void RunCaptureLoop(
+        SerialPort serialPort,
+        TextWriter logWriter,
+        ModbusSettings settings,
+        CancellationToken cancellationToken)
+    {
+        byte[] buffer = new byte[ReadBufferSize];
+        var receivedBytes = new List<byte>();
+        PendingRequest? pendingRequest = null;
+        LastResponse? lastResponse = null;
+        long usbTransmissionNumber = 0;
+        long previousUsbTransmissionTimestamp = 0;
+        var frameTransport = new FrameTransport();
+
+        while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                serialPort.Open();
-                return true;
+                int bytesRead = serialPort.Read(buffer, 0, buffer.Length);
+                UsbTransmission usbTransmission = CreateUsbTransmission(++usbTransmissionNumber, bytesRead, ref previousUsbTransmissionTimestamp);
+                ProcessReceivedBytes(receivedBytes, buffer.AsSpan(0, bytesRead), logWriter, ref pendingRequest, ref lastResponse, usbTransmission, frameTransport, settings.MasterDelayThresholdMilliseconds);
             }
-            catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or ArgumentException)
+            catch (TimeoutException)
             {
-                Console.Error.WriteLine($"Could not open {serialPort.PortName}: {exception.Message}");
-                PrintAvailablePorts();
-                Console.Write("Enter a port number or name to try, or press Enter to exit: ");
-                string? selection = Console.ReadLine();
-                if (string.IsNullOrWhiteSpace(selection))
-                {
-                    return false;
-                }
-
-                string[] availablePorts = SerialPort.GetPortNames()
-                    .OrderBy(port => port, StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
-                string? selectedPort = int.TryParse(selection, out int portNumber) &&
-                    portNumber >= 1 && portNumber <= availablePorts.Length
-                    ? availablePorts[portNumber - 1]
-                    : availablePorts.FirstOrDefault(port => string.Equals(port, selection.Trim(), StringComparison.OrdinalIgnoreCase));
-                if (selectedPort is null)
-                {
-                    Console.WriteLine("Invalid port selection.");
-                    continue;
-                }
-
-                serialPort.PortName = selectedPort;
+                PrintIncompleteBytes(receivedBytes, logWriter, frameTransport);
+            }
+            catch (IOException exception)
+            {
+                Console.Error.WriteLine($"Serial read failed on {serialPort.PortName}: {exception.Message}");
+                Console.Error.WriteLine("The adapter may have been removed. Stopping capture.");
+                return;
             }
         }
+    }
+
+    private static void WaitForKeyIfInteractive()
+    {
+        if (Console.IsInputRedirected)
+        {
+            return;
+        }
+
+        Console.WriteLine("Press any key to close.");
+        Console.ReadKey(intercept: true);
     }
 
     private static void PrintAvailablePorts()
@@ -194,10 +207,7 @@ internal class Program
         FrameTransport frameTransport,
         int masterDelayThresholdMilliseconds)
     {
-        foreach (byte value in bytes)
-        {
-            receivedBytes.Add(value);
-        }
+        receivedBytes.AddRange(bytes);
 
         while (true)
         {
@@ -611,7 +621,7 @@ internal class Program
         }
 
         TimeSpan responseTime = DateTimeOffset.UtcNow - pendingRequest.ObservedAt;
-    responseTimeMilliseconds = responseTime.TotalMilliseconds;
+        responseTimeMilliseconds = responseTime.TotalMilliseconds;
         pendingRequest = null;
         return (frame[1] & 0x80) != 0
             ? $"MATCHED_EXCEPTION_RESPONSE {responseTime.TotalMilliseconds:F1}ms"
@@ -809,6 +819,8 @@ internal class Program
         public int DataBits { get; private set; } = 8;
         public StopBits PortStopBits { get; private set; } = StopBits.One;
         public Handshake PortHandshake { get; private set; } = Handshake.None;
+        public bool DtrEnable { get; private set; }
+        public bool RtsEnable { get; private set; }
         public int PartialFrameTimeoutMilliseconds { get; private set; } = 100;
         public int MasterDelayThresholdMilliseconds { get; private set; } = 400;
 
@@ -825,6 +837,8 @@ internal class Program
                     "DataBits=8",
                     "StopBits=One",
                     "Handshake=None",
+                    "DtrEnable=false",
+                    "RtsEnable=false",
                     "PartialFrameTimeoutMilliseconds=100",
                     "MasterDelayThresholdMilliseconds=400"
                 ]);
@@ -858,6 +872,12 @@ internal class Program
                         break;
                     case "Handshake":
                         if (Enum.TryParse(parts[1], true, out Handshake handshake)) settings.PortHandshake = handshake;
+                        break;
+                    case "DtrEnable":
+                        if (bool.TryParse(parts[1], out bool dtrEnable)) settings.DtrEnable = dtrEnable;
+                        break;
+                    case "RtsEnable":
+                        if (bool.TryParse(parts[1], out bool rtsEnable)) settings.RtsEnable = rtsEnable;
                         break;
                     case "PartialFrameTimeoutMilliseconds":
                         if (int.TryParse(parts[1], out int partialTimeout) && partialTimeout > 0) settings.PartialFrameTimeoutMilliseconds = partialTimeout;

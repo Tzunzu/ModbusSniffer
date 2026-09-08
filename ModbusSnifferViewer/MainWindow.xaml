@@ -27,13 +27,37 @@
                 <Button Grid.Column="2" Content="Open log..." Padding="14,7" Click="OpenLog_Click" />
             </Grid>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="0,0,8,0" />
-                <TextBox x:Name="FilterTextBox" Width="280" Padding="6" TextChanged="FilterTextBox_TextChanged" />
+                <TextBlock Text="Search:" VerticalAlignment="Center" Margin="0,0,8,0" />
+                <TextBox x:Name="SearchTextBox" Width="280" Padding="6" KeyDown="SearchTextBox_KeyDown" />
+                <Button Content="Find next" Margin="8,0,0,0" Padding="12,6" Click="FindNext_Click" />
                 <CheckBox x:Name="ErrorsOnlyCheckBox" Content="Errors only" Margin="16,0,0,0" VerticalAlignment="Center" Checked="FilterChanged" Unchecked="FilterChanged" />
                 <TextBlock x:Name="CountText" Margin="20,0,0,0" VerticalAlignment="Center" Foreground="#52606D" />
             </StackPanel>
             <GroupBox Header="Complete log" Margin="0,0,0,10" Padding="8">
-                <TextBlock x:Name="StatisticsText" TextWrapping="Wrap" Foreground="#334E68" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                        <TextBlock Text="Overview" FontWeight="SemiBold" Foreground="#1F2933" Margin="0,0,0,4" />
+                        <TextBlock x:Name="OverviewText" TextWrapping="Wrap" Foreground="#334E68" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Margin="0,0,12,0">
+                        <TextBlock Text="Traffic" FontWeight="SemiBold" Foreground="#1F2933" Margin="0,0,0,4" />
+                        <TextBlock x:Name="TrafficText" TextWrapping="Wrap" Foreground="#334E68" FontFamily="Consolas" FontSize="11" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Margin="0,0,12,0">
+                        <TextBlock Text="Errors" FontWeight="SemiBold" Foreground="#1F2933" Margin="0,0,0,4" />
+                        <TextBlock x:Name="ErrorsText" TextWrapping="Wrap" Foreground="#334E68" FontFamily="Consolas" FontSize="11" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="3">
+                        <TextBlock Text="Latency &amp; timing" FontWeight="SemiBold" Foreground="#1F2933" Margin="0,0,0,4" />
+                        <TextBlock x:Name="TimingText" TextWrapping="Wrap" Foreground="#334E68" />
+                    </StackPanel>
+                </Grid>
             </GroupBox>
         </StackPanel>
         <GroupBox DockPanel.Dock="Bottom" Header="Selected record" Margin="0,12,0,0" Padding="8">

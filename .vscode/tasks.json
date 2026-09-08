@@ -32,7 +32,7 @@
             "args": [
                 "-NoProfile",
                 "-Command",
-                "if (Test-Path release) { Remove-Item release -Recurse -Force }; dotnet publish ModbusSniffer/ModbusSniffer.csproj -c Release -o release; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; dotnet publish ModbusSnifferViewer/ModbusSnifferViewer.csproj -c Release -o release; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Copy-Item README.md release -Force"
+                "if (Test-Path release) { Get-ChildItem -Path release -Force | Where-Object Name -ne 'log' | Remove-Item -Recurse -Force }; dotnet publish ModbusSniffer/ModbusSniffer.csproj -c Release -o release; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; dotnet publish ModbusSnifferViewer/ModbusSnifferViewer.csproj -c Release -o release; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Copy-Item README.md release -Force"
             ],
             "problemMatcher": "$msCompile",
             "group": "build"
