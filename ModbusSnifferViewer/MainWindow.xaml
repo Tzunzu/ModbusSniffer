@@ -66,9 +66,10 @@
         <DataGrid x:Name="LogGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True" SelectionChanged="LogGrid_SelectionChanged" Background="White" BorderBrush="#D9E2EC" GridLinesVisibility="Horizontal">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Time" Binding="{Binding Timestamp, StringFormat={}{0:yyyy-MM-dd HH:mm:ss.fff}}" Width="175" />
-                <DataGridTextColumn Header="Label" Binding="{Binding Label}" Width="260" />
+                <DataGridTextColumn Header="Label" Binding="{Binding Label}" Width="220" />
                 <DataGridTextColumn Header="Address" Binding="{Binding Address}" Width="75" />
-                <DataGridTextColumn Header="Function" Binding="{Binding Function}" Width="80" />
+                <DataGridTextColumn Header="Function" Binding="{Binding Function}" Width="70" />
+                <DataGridTextColumn Header="Function name" Binding="{Binding FunctionName}" Width="185" />
                 <DataGridTextColumn Header="Length" Binding="{Binding Length}" Width="65" />
                 <DataGridTextColumn Header="USB transmissions" Binding="{Binding UsbTransmissions}" Width="125" />
                 <DataGridTextColumn Header="Response ms" Binding="{Binding ResponseTimeMilliseconds, StringFormat={}{0:F1}}" Width="95" />

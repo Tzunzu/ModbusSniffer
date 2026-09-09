@@ -25,10 +25,28 @@ public class ModbusFrameTests
     [InlineData("01100000000204DEADBEEF0000", "REQUEST")]// FC10, length == byteCount + 9
     [InlineData("0106000000000000", "AMBIGUOUS")]        // FC06 layouts overlap in both directions
     [InlineData("018302C0F1", "RESPONSE")]               // exception response, function | 0x80
-    [InlineData("01070000", "UNKNOWN")]                  // function code the sniffer does not model
+    [InlineData("01070000", "REQUEST")]                  // FC07 Read Exception Status, 4-byte request
+    [InlineData("0107000000", "RESPONSE")]               // FC07, 5-byte response
+    [InlineData("010B0000", "REQUEST")]                  // FC0B Get Comm Event Counter request
+    [InlineData("010B000000000000", "RESPONSE")]         // FC0B, 8-byte response
+    [InlineData("01110000", "REQUEST")]                  // FC11 Report Server ID request
+    [InlineData("011800000000", "REQUEST")]              // FC18 Read FIFO Queue, 6-byte request
+    [InlineData("01180000000000", "RESPONSE")]           // FC18, non-6-byte response
+    [InlineData("0108000000000000", "AMBIGUOUS")]        // FC08 Diagnostics echoes the request
+    [InlineData("012B0E04000000", "REQUEST")]            // FC2B Encapsulated Interface Transport request
+    [InlineData("0109000000", "UNKNOWN")]                // FC09 has no defined layout
     [InlineData("01", "INCOMPLETE")]                     // fewer than two bytes
     public void GetModbusDirection_classifies_frame(string hex, string expected) =>
         Assert.Equal(expected, Sut.GetModbusDirection(Bytes(hex)));
+
+    [Theory]
+    [InlineData(0x03, "Read Holding Registers")]
+    [InlineData(0x10, "Write Multiple Registers")]
+    [InlineData(0x2B, "Encapsulated Interface Transport")]
+    [InlineData(0x83, "Read Holding Registers exception")]
+    [InlineData(0x64, "Unknown function 0x64")]
+    public void FunctionName_maps_code_to_name(int code, string expected) =>
+        Assert.Equal(expected, Sut.FunctionName((byte)code));
 
     [Fact]
     public void GetModbusDirection_reads_long_response_as_response() =>
@@ -56,10 +74,15 @@ public class ModbusFrameTests
         Assert.False(Sut.HasValidModbusCrc(RequestFc03, RequestFc03.Length - 1));
 
     [Theory]
-    [InlineData("0103", new[] { 8 })]
-    [InlineData("010358", new[] { 8, 93 })]
-    [InlineData("0183", new[] { 5 })]
-    [InlineData("0107", new int[0])]
+    [InlineData("0103", new[] { 8 })]                 // FC03 read request
+    [InlineData("010358", new[] { 8, 93 })]           // FC03 with a byte count of 0x58
+    [InlineData("0183", new[] { 5 })]                 // exception response
+    [InlineData("0107", new[] { 4, 5 })]              // FC07 request or response
+    [InlineData("010B", new[] { 4, 8 })]              // FC0B request or response
+    [InlineData("0108", new[] { 8 })]                 // FC08 diagnostics echo
+    [InlineData("0111", new[] { 4 })]                 // FC11 request (no byte count yet)
+    [InlineData("01180040", new[] { 6, 70 })]         // FC18 request or 16-bit byte-count response
+    [InlineData("0109", new int[0])]                  // undefined function code
     public void GetPossibleFrameLengths_matches_function_layout(string hex, int[] expected) =>
         Assert.Equal(expected, Sut.GetPossibleFrameLengths(Bytes(hex)));
 

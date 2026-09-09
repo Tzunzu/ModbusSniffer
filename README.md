@@ -7,6 +7,7 @@ A .NET 8 console application for monitoring and analyzing Modbus RTU traffic on 
 - Captures serial traffic from a configured COM port.
 - Detects CRC-valid Modbus RTU frames.
 - Classifies requests, responses, ambiguous frames, and incomplete traffic.
+- Frames every standard function code (0x01-0x18, 0x2B) and tags each record with its name, for example `Read Holding Registers`.
 - Matches responses to requests and reports response timing.
 - Reports missing responses, mismatches, and master delays.
 - Lists available COM ports with Windows device names when the configured port cannot be opened.

@@ -116,7 +116,8 @@ internal class Program
         Console.WriteLine("If that still happens, turn off \"Serial Enumerator\" in Device Manager under");
         Console.WriteLine("the port's Port Settings, Advanced.");
         Console.WriteLine("For lower USB latency, set the adapter latency timer to 1 ms.");
-        Console.WriteLine("Frames are marked REQUEST, RESPONSE, or AMBIGUOUS when Modbus layouts overlap.");
+        Console.WriteLine("Frames are marked REQUEST, RESPONSE, or AMBIGUOUS when Modbus layouts overlap,");
+        Console.WriteLine("and tagged with the Modbus function name (for example Read Holding Registers).");
         Console.WriteLine($"Logging to {logFilePath}");
         Console.WriteLine($"Summary will be written to {summaryFilePath}");
     }
@@ -306,18 +307,24 @@ internal class Program
         return false;
     }
 
+    // Candidate total RTU frame lengths (address + PDU + 2-byte CRC) for the
+    // function code in bytes[1]. Both request and response layouts are offered
+    // where they differ; the caller keeps whichever length produces a valid CRC.
     internal static IEnumerable<int> GetPossibleFrameLengths(IReadOnlyList<byte> bytes)
     {
-        byte functionCode = bytes[1];
-        if ((functionCode & 0x80) != 0)
+        if ((bytes[1] & 0x80) != 0)
         {
-            yield return 5;
+            yield return 5; // address + function + exception code + CRC
             yield break;
         }
 
-        switch (functionCode)
+        switch (bytes[1] & 0x7F)
         {
-            case >= 0x01 and <= 0x04:
+            // Coil/register reads: 8-byte request, byte-count response.
+            case 0x01:
+            case 0x02:
+            case 0x03:
+            case 0x04:
                 yield return 8;
                 if (bytes.Count >= 3)
                 {
@@ -325,10 +332,43 @@ internal class Program
                 }
 
                 break;
+
+            // Single writes: request and response are the same 8-byte echo.
             case 0x05:
             case 0x06:
                 yield return 8;
                 break;
+
+            // Read Exception Status: 4-byte request, 5-byte response.
+            case 0x07:
+                yield return 4;
+                yield return 5;
+                break;
+
+            // Diagnostics: 8-byte request, 8-byte echo response.
+            case 0x08:
+                yield return 8;
+                break;
+
+            // Get Comm Event Counter: 4-byte request, 8-byte response.
+            case 0x0B:
+                yield return 4;
+                yield return 8;
+                break;
+
+            // Get Comm Event Log / Report Server ID: 4-byte request,
+            // byte-count response.
+            case 0x0C:
+            case 0x11:
+                yield return 4;
+                if (bytes.Count >= 3)
+                {
+                    yield return bytes[2] + 5;
+                }
+
+                break;
+
+            // Multiple writes: 8-byte response, byte-count request.
             case 0x0F:
             case 0x10:
                 yield return 8;
@@ -338,9 +378,23 @@ internal class Program
                 }
 
                 break;
+
+            // Read/Write File Record: byte-count request and response.
+            case 0x14:
+            case 0x15:
+                if (bytes.Count >= 3)
+                {
+                    yield return bytes[2] + 5;
+                }
+
+                break;
+
+            // Mask Write Register: request and response are the same 10-byte frame.
             case 0x16:
                 yield return 10;
                 break;
+
+            // Read/Write Multiple Registers: byte-count response, byte-count request.
             case 0x17:
                 if (bytes.Count >= 3)
                 {
@@ -353,15 +407,53 @@ internal class Program
                 }
 
                 break;
+
+            // Read FIFO Queue: 6-byte request, 16-bit byte-count response.
             case 0x18:
                 yield return 6;
-                if (bytes.Count >= 3)
+                if (bytes.Count >= 4)
                 {
-                    yield return bytes[2] + 5;
+                    yield return ((bytes[2] << 8) | bytes[3]) + 6;
+                }
+
+                break;
+
+            // Encapsulated Interface Transport (Read Device Identification).
+            case 0x2B:
+                yield return 7; // MEI type 0x0E request
+                foreach (int length in ReadDeviceIdResponseLengths(bytes))
+                {
+                    yield return length;
                 }
 
                 break;
         }
+    }
+
+    // Read Device Identification responses carry a variable object list with no
+    // total-length field, so the list is walked to the end. Nothing is yielded
+    // until every object has arrived in the buffer.
+    private static IEnumerable<int> ReadDeviceIdResponseLengths(IReadOnlyList<byte> bytes)
+    {
+        // address, function, MEI type, ReadDevId code, conformity, MoreFollows,
+        // NextObjectId, NumberOfObjects, then [objectId, length, value...] per object.
+        if (bytes.Count < 8 || bytes[2] != 0x0E)
+        {
+            yield break;
+        }
+
+        int position = 8;
+        for (int index = 0; index < bytes[7]; index++)
+        {
+            if (position + 2 > bytes.Count)
+            {
+                yield break;
+            }
+
+            position += 2 + bytes[position + 1];
+        }
+
+        yield return position + 2;
     }
 
     internal static bool HasValidModbusCrc(IReadOnlyList<byte> bytes, int frameLength)
@@ -400,8 +492,9 @@ internal class Program
         double? responseTimeMilliseconds = null,
         double? masterDelayMilliseconds = null)
     {
+        string? functionName = includeModbusHeader ? FunctionName(bytes[1]) : null;
         string modbusHeader = includeModbusHeader
-            ? $" address={bytes[0]}(0x{bytes[0]:X2}) function=0x{(bytes[1] & 0x7F):X2} length={bytes.Length}"
+            ? $" address={bytes[0]}(0x{bytes[0]:X2}) function=0x{(bytes[1] & 0x7F):X2} ({functionName}) length={bytes.Length}"
             : string.Empty;
         var line = new StringBuilder($"[{label}{modbusHeader} {frameTransport}] ");
 
@@ -422,7 +515,8 @@ internal class Program
             frameTransport.MaximumGapMilliseconds,
             responseTimeMilliseconds,
             masterDelayMilliseconds,
-            Convert.ToHexString(bytes));
+            Convert.ToHexString(bytes),
+            functionName);
         captureRecords.Add(captureRecord);
         log.Write(line.ToString(), JsonSerializer.Serialize(captureRecord));
     }
@@ -460,7 +554,8 @@ internal class Program
             0,
             null,
             delayMilliseconds,
-            string.Empty);
+            string.Empty,
+            FunctionName(request[1]));
         captureRecords.Add(captureRecord);
         log.Write(line, JsonSerializer.Serialize(captureRecord));
     }
@@ -486,7 +581,8 @@ internal class Program
             0,
             null,
             null,
-            string.Empty);
+            string.Empty,
+            FunctionName(pendingRequest.FunctionCode));
         captureRecords.Add(captureRecord);
         log.Write(line, JsonSerializer.Serialize(captureRecord));
     }
@@ -532,6 +628,25 @@ internal class Program
         foreach (var group in recordsByType)
         {
             report.AppendLine($"  {group.Key,-28} {group.Count(),6}");
+        }
+
+        report.AppendLine();
+        report.AppendLine("Function codes seen:");
+        var recordsByFunction = captureRecords
+            .Where(record => record.Function.HasValue)
+            .GroupBy(record => record.Function!.Value)
+            .OrderBy(group => group.Key)
+            .ToArray();
+        if (recordsByFunction.Length == 0)
+        {
+            report.AppendLine("  None");
+        }
+        else
+        {
+            foreach (var group in recordsByFunction)
+            {
+                report.AppendLine($"  0x{group.Key:X2}  {FunctionName(group.Key),-34} {group.Count(),6}");
+            }
         }
 
         report.AppendLine();
@@ -589,19 +704,55 @@ internal class Program
             return "INCOMPLETE";
         }
 
-        byte functionCode = frame[1];
-        if ((functionCode & 0x80) != 0)
+        if ((frame[1] & 0x80) != 0)
         {
             return "RESPONSE";
         }
 
-        return functionCode switch
+        return (frame[1] & 0x7F) switch
         {
-            >= 0x01 and <= 0x04 => GetReadDirection(frame),
+            0x01 or 0x02 or 0x03 or 0x04 => GetReadDirection(frame),
             0x0F or 0x10 => GetMultipleWriteDirection(frame),
-            0x05 or 0x06 or 0x16 => "AMBIGUOUS",
+            0x07 or 0x0B or 0x0C or 0x11 => frame.Length == 4 ? "REQUEST" : "RESPONSE",
+            0x18 => frame.Length == 6 ? "REQUEST" : "RESPONSE",
+            0x2B => frame.Length == 7 ? "REQUEST" : "RESPONSE",
+
+            // Echoed or length-overlapping layouts: the direction cannot be told
+            // from the frame alone.
+            0x05 or 0x06 or 0x08 or 0x14 or 0x15 or 0x16 => "AMBIGUOUS",
             _ => "UNKNOWN"
         };
+    }
+
+    // Human-readable Modbus function name for display and summaries. Accepts the
+    // raw function byte, including the 0x80 exception bit.
+    internal static string FunctionName(byte functionCode)
+    {
+        string name = (functionCode & 0x7F) switch
+        {
+            0x01 => "Read Coils",
+            0x02 => "Read Discrete Inputs",
+            0x03 => "Read Holding Registers",
+            0x04 => "Read Input Registers",
+            0x05 => "Write Single Coil",
+            0x06 => "Write Single Register",
+            0x07 => "Read Exception Status",
+            0x08 => "Diagnostics",
+            0x0B => "Get Comm Event Counter",
+            0x0C => "Get Comm Event Log",
+            0x0F => "Write Multiple Coils",
+            0x10 => "Write Multiple Registers",
+            0x11 => "Report Server ID",
+            0x14 => "Read File Record",
+            0x15 => "Write File Record",
+            0x16 => "Mask Write Register",
+            0x17 => "Read/Write Multiple Registers",
+            0x18 => "Read FIFO Queue",
+            0x2B => "Encapsulated Interface Transport",
+            _ => $"Unknown function 0x{functionCode & 0x7F:X2}"
+        };
+
+        return (functionCode & 0x80) != 0 ? $"{name} exception" : name;
     }
 
     private static string GetResponseLabel(
@@ -1001,7 +1152,8 @@ internal class Program
         double MaximumGapMilliseconds,
         double? ResponseTimeMilliseconds,
         double? MasterDelayMilliseconds,
-        string Hex);
+        string Hex,
+        string? FunctionName = null);
 
     private readonly record struct UsbTransmission(long Number, int ByteCount, double GapMilliseconds);
 

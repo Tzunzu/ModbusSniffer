@@ -166,6 +166,21 @@ public partial class MainWindow : System.Windows.Window
             traffic.AppendLine($"{group.Key,-26} {group.Count(),6} {100d * group.Count() / entries.Count,5:F1}%");
         }
 
+        List<IGrouping<string, LogEntry>> byFunction = entries
+            .Where(entry => entry.FunctionName.Length > 0)
+            .GroupBy(entry => entry.FunctionName)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
+            .ToList();
+        if (byFunction.Count > 0)
+        {
+            traffic.AppendLine();
+            foreach (IGrouping<string, LogEntry> group in byFunction)
+            {
+                traffic.AppendLine($"{group.Key,-34} {group.Count(),6}");
+            }
+        }
+
         var byAddress = entries
             .Where(entry => entry.Address.Length > 0)
             .GroupBy(entry => entry.Address)
@@ -290,6 +305,7 @@ public partial class MainWindow : System.Windows.Window
         public string Label { get; init; } = string.Empty;
         public string Address { get; init; } = string.Empty;
         public string Function { get; init; } = string.Empty;
+        public string FunctionName { get; init; } = string.Empty;
         public int Length { get; init; }
         public string UsbTransmissions { get; init; } = string.Empty;
         public int UsbTransmissionCount { get; init; }
@@ -298,7 +314,7 @@ public partial class MainWindow : System.Windows.Window
         public double MaximumGapMilliseconds { get; init; }
         public bool IsError { get; init; }
         public string Details { get; init; } = string.Empty;
-        public string SearchText => $"{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Label} {Address} {Function} {Length} {UsbTransmissions} {ResponseTimeMilliseconds} {MaximumGapMilliseconds} {Details}";
+        public string SearchText => $"{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Label} {Address} {Function} {FunctionName} {Length} {UsbTransmissions} {ResponseTimeMilliseconds} {MaximumGapMilliseconds} {Details}";
 
         public string Type =>
             Label.StartsWith("MATCHED_EXCEPTION", StringComparison.Ordinal) ? "MATCHED_EXCEPTION_RESPONSE" :
@@ -332,6 +348,9 @@ public partial class MainWindow : System.Windows.Window
                     Label = label,
                     Address = FormatByte(root, "Address"),
                     Function = FormatByte(root, "Function"),
+                    FunctionName = root.TryGetProperty("FunctionName", out JsonElement functionName) && functionName.ValueKind == JsonValueKind.String
+                        ? functionName.GetString() ?? string.Empty
+                        : string.Empty,
                     Length = root.GetProperty("Length").GetInt32(),
                     UsbTransmissions = count == 0 ? string.Empty : $"#{first}-#{last} ({count})",
                     UsbTransmissionCount = count,
