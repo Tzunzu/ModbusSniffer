@@ -304,6 +304,7 @@ public partial class MainWindow : System.Windows.Window
         public DateTimeOffset Timestamp { get; init; }
         public string Label { get; init; } = string.Empty;
         public string Address { get; init; } = string.Empty;
+        public int? AddressDecimal { get; init; }
         public string Function { get; init; } = string.Empty;
         public string FunctionName { get; init; } = string.Empty;
         public int Length { get; init; }
@@ -314,7 +315,23 @@ public partial class MainWindow : System.Windows.Window
         public double MaximumGapMilliseconds { get; init; }
         public bool IsError { get; init; }
         public string Details { get; init; } = string.Empty;
-        public string SearchText => $"{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Label} {Address} {Function} {FunctionName} {Length} {UsbTransmissions} {ResponseTimeMilliseconds} {MaximumGapMilliseconds} {Details}";
+        public string SearchText => $"{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Label} {Address} {AddressDecimal} {Function} {FunctionName} {Length} {UsbTransmissions} {ResponseTimeMilliseconds} {MaximumGapMilliseconds} {Details}";
+
+        // The received frame length split by direction: a request-shaped frame
+        // fills RequestLength, a response-shaped one fills ResponseLength, and an
+        // AMBIGUOUS frame (layouts overlap) fills both. Markers with no frame
+        // (NO_RESPONSE, MASTER_DELAY) and undecoded runs (INCOMPLETE, TRUNCATED)
+        // fill neither.
+        public int? RequestLength => Length > 0 && (IsRequest || IsAmbiguous) ? Length : null;
+        public int? ResponseLength => Length > 0 && (IsResponse || IsAmbiguous) ? Length : null;
+
+        private bool IsRequest => Label.StartsWith("REQUEST", StringComparison.Ordinal);
+        private bool IsAmbiguous => Label.StartsWith("AMBIGUOUS", StringComparison.Ordinal);
+        private bool IsResponse =>
+            Label.StartsWith("MATCHED_RESPONSE", StringComparison.Ordinal) ||
+            Label.StartsWith("MATCHED_EXCEPTION", StringComparison.Ordinal) ||
+            Label.StartsWith("RESPONSE_MISMATCH", StringComparison.Ordinal) ||
+            Label.StartsWith("RESPONSE_WITHOUT_REQUEST", StringComparison.Ordinal);
 
         public string Type =>
             Label.StartsWith("MATCHED_EXCEPTION", StringComparison.Ordinal) ? "MATCHED_EXCEPTION_RESPONSE" :
@@ -347,6 +364,9 @@ public partial class MainWindow : System.Windows.Window
                     Timestamp = root.GetProperty("Timestamp").GetDateTimeOffset(),
                     Label = label,
                     Address = FormatByte(root, "Address"),
+                    AddressDecimal = root.TryGetProperty("Address", out JsonElement address) && address.ValueKind == JsonValueKind.Number
+                        ? address.GetByte()
+                        : null,
                     Function = FormatByte(root, "Function"),
                     FunctionName = root.TryGetProperty("FunctionName", out JsonElement functionName) && functionName.ValueKind == JsonValueKind.String
                         ? functionName.GetString() ?? string.Empty
