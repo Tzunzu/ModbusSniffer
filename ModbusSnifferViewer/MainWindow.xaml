@@ -7,6 +7,11 @@
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
         <Style TargetType="DataGridRow">
             <Style.Triggers>
+                <!-- SuspectGap first so an error row (red) still wins when a frame is both. -->
+                <DataTrigger Binding="{Binding SuspectGap}" Value="True">
+                    <Setter Property="Background" Value="#FFF6D8" />
+                    <Setter Property="Foreground" Value="#7A4F01" />
+                </DataTrigger>
                 <DataTrigger Binding="{Binding IsError}" Value="True">
                     <Setter Property="Background" Value="#FFF0F0" />
                     <Setter Property="Foreground" Value="#9B1C1C" />
@@ -76,7 +81,20 @@
                 <DataGridTextColumn Header="Resp qty" Binding="{Binding ResponseQuantity}" Width="62" />
                 <DataGridTextColumn Header="USB transmissions" Binding="{Binding UsbTransmissions}" Width="115" />
                 <DataGridTextColumn Header="Response ms" Binding="{Binding ResponseTimeMilliseconds, StringFormat={}{0:F1}}" Width="90" />
-                <DataGridTextColumn Header="Max gap ms" Binding="{Binding MaximumGapMilliseconds, StringFormat={}{0:F3}}" Width="90" />
+                <DataGridTextColumn Header="Max gap ms" Binding="{Binding MaximumGapMilliseconds, StringFormat={}{0:F3}}" Width="90">
+                    <DataGridTextColumn.CellStyle>
+                        <Style TargetType="DataGridCell">
+                            <Style.Triggers>
+                                <!-- Highlight the gap cell even on red error rows, so the SUSPECT_GAP signal is never hidden. -->
+                                <DataTrigger Binding="{Binding SuspectGap}" Value="True">
+                                    <Setter Property="Background" Value="#F6C445" />
+                                    <Setter Property="Foreground" Value="#3B2F00" />
+                                    <Setter Property="FontWeight" Value="Bold" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGridTextColumn.CellStyle>
+                </DataGridTextColumn>
             </DataGrid.Columns>
         </DataGrid>
     </DockPanel>

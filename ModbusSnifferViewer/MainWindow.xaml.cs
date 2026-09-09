@@ -242,6 +242,7 @@ public partial class MainWindow : System.Windows.Window
             .ToList();
         double maxUsbGap = entries.Max(entry => entry.MaximumGapMilliseconds);
         int splitFrames = entries.Count(entry => entry.UsbTransmissionCount > 1);
+        int suspectGapFrames = entries.Count(entry => entry.SuspectGap);
 
         var timing = new List<string>
         {
@@ -251,7 +252,10 @@ public partial class MainWindow : System.Windows.Window
                 ? $"response ms  avg {responseTimes.Average():F1}  p50 {Percentile(responseTimes, 50):F1}  p95 {Percentile(responseTimes, 95):F1}  max {responseTimes[^1]:F1}"
                 : "response latency n/a",
             $"max USB intra-frame gap {maxUsbGap:F3} ms",
-            $"{splitFrames:N0} frames split across USB reads"
+            $"{splitFrames:N0} frames split across USB reads",
+            suspectGapFrames > 0
+                ? $"{suspectGapFrames:N0} frames flagged SUSPECT_GAP (intra-frame gap >= t3.5)"
+                : "no SUSPECT_GAP frames"
         };
         if (masterDelays.Count > 0)
         {
@@ -313,9 +317,10 @@ public partial class MainWindow : System.Windows.Window
         public double? ResponseTimeMilliseconds { get; init; }
         public double? MasterDelayMilliseconds { get; init; }
         public double MaximumGapMilliseconds { get; init; }
+        public bool SuspectGap { get; init; }
         public bool IsError { get; init; }
         public string Details { get; init; } = string.Empty;
-        public string SearchText => $"{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Label} {Address} {AddressDecimal} {Function} {FunctionName} {Length} {RequestQuantity} {ResponseQuantity} {UsbTransmissions} {ResponseTimeMilliseconds} {MaximumGapMilliseconds} {Details}";
+        public string SearchText => $"{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Label} {Address} {AddressDecimal} {Function} {FunctionName} {Length} {RequestQuantity} {ResponseQuantity} {UsbTransmissions} {ResponseTimeMilliseconds} {MaximumGapMilliseconds} {(SuspectGap ? "SUSPECT_GAP" : string.Empty)} {Details}";
 
         // Quantity of registers/coils named in the frame, decoded from the hex:
         // for a request it is the "quantity" field; for a read response it is
@@ -431,6 +436,7 @@ public partial class MainWindow : System.Windows.Window
                     ResponseTimeMilliseconds = GetNullableDouble(root, "ResponseTimeMilliseconds"),
                     MasterDelayMilliseconds = GetNullableDouble(root, "MasterDelayMilliseconds"),
                     MaximumGapMilliseconds = root.GetProperty("MaximumGapMilliseconds").GetDouble(),
+                    SuspectGap = root.TryGetProperty("SuspectGap", out JsonElement suspectGap) && suspectGap.ValueKind == JsonValueKind.True,
                     IsError = IsErrorLabel(label),
                     Details = root.TryGetProperty("Hex", out JsonElement hex) ? hex.GetString() ?? string.Empty : line
                 };

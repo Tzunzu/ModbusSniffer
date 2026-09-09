@@ -40,6 +40,14 @@ public class ModbusFrameTests
         Assert.Equal(expected, Sut.GetModbusDirection(Bytes(hex)));
 
     [Theory]
+    [InlineData(115200, 1.75)]              // fixed 1.75 ms above 19200 baud (Modbus spec)
+    [InlineData(57600, 1.75)]
+    [InlineData(19200, 2.0052083333333335)] // 3.5 * 11 bits / baud below the fixed cut-off
+    [InlineData(9600, 4.010416666666667)]
+    public void ComputeFrameGapThresholdMilliseconds_follows_modbus_spec(int baudRate, double expected) =>
+        Assert.Equal(expected, Sut.ComputeFrameGapThresholdMilliseconds(baudRate), 6);
+
+    [Theory]
     [InlineData(0x03, "Read Holding Registers")]
     [InlineData(0x10, "Write Multiple Registers")]
     [InlineData(0x2B, "Encapsulated Interface Transport")]

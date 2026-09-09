@@ -39,17 +39,17 @@ Modbus RTU uses CRC-16. The sniffer only labels a frame as a valid request or re
 
 Modbus RTU does not have a special start byte. Frames are separated on the physical serial line by a silent interval of at least 3.5 character times.
 
-At the configured `57600, 8N1` link:
+*MODBUS over Serial Line V1.02*, section 2.5.1.1, **fixes this interval at 1.750 ms for any baud rate above 19200**, rather than scaling it with the character time. Below 19200 baud it is 3.5 character times, where a character is the Modbus-standard 11 bits (start, 8 data, parity, stop):
 
 $$
-t_{\text{character}} = \frac{10}{57600} \approx 0.174\text{ ms}
+t_{3.5} = 3.5 \times \frac{11}{\text{baud}}
 $$
 
-$$
-t_{3.5} \approx 0.61\text{ ms}
-$$
+At the configured `57600, 8N1` link the fixed value applies, so $t_{3.5} = 1.75\text{ ms}$. (The earlier $0.61\text{ ms}$ figure came from the raw $3.5 \times 10 / 57600$ formula and does not match how real Modbus stacks time the gap above 19200 baud.)
 
 Once the PLC receives the first byte of a response, an on-wire interruption longer than this can make it treat the frame as complete or invalid.
+
+`ComputeFrameGapThresholdMilliseconds` in `Program.cs` returns this value, and any frame whose largest intra-frame host USB read gap reaches it is flagged `SUSPECT_GAP` (see below). 1.75 ms is near the resolution floor of a 1 ms-latency FTDI capture, so a flag is a lead to correlate against PLC diagnostics, not proof of an on-wire violation.
 
 ### PLC first-response timeout
 
@@ -77,6 +77,8 @@ usbTransmissions=#17-#19 count=3 maxGap=3.711ms
 
 This is a Windows/FTDI host-delivery measurement, not a direct measurement of individual bytes on RS-485. FTDI FIFO buffering, USB transfer scheduling, the driver latency timer, and Windows thread scheduling can all affect it.
 
+The serial port is now drained on a dedicated above-normal-priority thread (`SerialReader`) that does nothing but read bytes and take the arrival timestamp. Framing, CRC checks and logging run on the consumer thread, so parse cost no longer delays the next read and inflates this gap. The FTDI latency timer is also programmed to 1 ms through the D2XX API at startup (`FtdiLatencyConfigurator`, `FtdiLatencyTimerMilliseconds` in the INI), because the driver otherwise resets it to 16 ms on every reboot, replug, or USB-port change.
+
 ## Capture Labels
 
 | Label | Meaning |
@@ -90,6 +92,7 @@ This is a Windows/FTDI host-delivery measurement, not a direct measurement of in
 | `TRUNCATED_BY_REQUEST` | Buffered bytes did not form a CRC-valid frame before a later CRC-valid request began. This is suspicious partial/corrupt/interrupted traffic. |
 | `INCOMPLETE` | Buffered bytes did not form a CRC-valid frame before the sniffer's host-side timeout. |
 | `MASTER_DELAY_AFTER_RESPONSE` | More than 400 ms elapsed between the previous valid response and the next observed request. This is a timing marker, not a byte/CRC error. |
+| `SUSPECT_GAP` | The largest gap between USB reads that make up this frame reached the Modbus $t_{3.5}$ threshold (1.75 ms above 19200 baud). Recorded as a `SuspectGap` flag on the frame and shown as a marker in the console line. A host-side approximation of an on-wire end-of-frame silence, not a byte/CRC error and not proof; the viewer shades these rows yellow. |
 
 ## Findings So Far
 

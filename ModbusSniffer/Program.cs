@@ -17,6 +17,7 @@ internal class Program
     private const int StandardOutputHandle = -11;
     private const uint EnableWrapAtEndOfLineOutput = 0x0002;
     private const int ReadBufferSize = 4096;
+    private const int SerialDriverReadBufferSize = 1 << 16;
     private static readonly List<CaptureRecord> captureRecords = [];
 
     private static int Main()
@@ -26,6 +27,15 @@ internal class Program
         captureRecords.Clear();
 
         ModbusSettings settings = ModbusSettings.Load(Path.Combine(AppContext.BaseDirectory, ConfigurationFileName));
+        double frameGapSuspectMilliseconds = settings.FrameGapSuspectMilliseconds > 0
+            ? settings.FrameGapSuspectMilliseconds
+            : ComputeFrameGapThresholdMilliseconds(settings.BaudRate);
+
+        // Program the FTDI latency timer before the port is opened. The FTDI
+        // driver resets this to 16 ms on every reboot, replug, or USB-port change,
+        // so it is re-applied on every run rather than trusted to a registry edit.
+        Console.WriteLine(FtdiLatencyConfigurator.Apply(settings.PortName, settings.FtdiLatencyTimerMilliseconds));
+
         DateTimeOffset sessionStartedAt = DateTimeOffset.Now;
         string logDirectoryPath = Path.Combine(AppContext.BaseDirectory, LogDirectoryName);
         Directory.CreateDirectory(logDirectoryPath);
@@ -51,8 +61,8 @@ internal class Program
 
         try
         {
-            PrintCaptureBanner(serialPort, logFilePath, summaryFilePath);
-            RunCaptureLoop(serialPort, log, settings, cancellationSource.Token);
+            PrintCaptureBanner(serialPort, logFilePath, summaryFilePath, settings.BaudRate, frameGapSuspectMilliseconds);
+            RunCaptureLoop(serialPort, log, settings, frameGapSuspectMilliseconds, cancellationSource.Token);
             log.WriteConsole("Stopped.");
             return 0;
         }
@@ -78,6 +88,10 @@ internal class Program
         {
             Handshake = settings.PortHandshake,
             ReadTimeout = settings.PartialFrameTimeoutMilliseconds,
+
+            // A large driver read buffer so a burst that arrives while the
+            // consumer thread is still parsing the previous one is never dropped.
+            ReadBufferSize = SerialDriverReadBufferSize,
 
             // Keep RTS deasserted so the adapter never keys the RS-485 driver.
             RtsEnable = settings.RtsEnable,
@@ -108,7 +122,12 @@ internal class Program
         }
     }
 
-    private static void PrintCaptureBanner(SerialPort serialPort, string logFilePath, string summaryFilePath)
+    private static void PrintCaptureBanner(
+        SerialPort serialPort,
+        string logFilePath,
+        string summaryFilePath,
+        int baudRate,
+        double frameGapSuspectMilliseconds)
     {
         Console.WriteLine($"Listening on {serialPort.PortName} at {serialPort.BaudRate} baud. Press Ctrl+C to stop.");
         Console.WriteLine("Leave this program running for the whole capture. While the port is closed,");
@@ -116,6 +135,8 @@ internal class Program
         Console.WriteLine("If that still happens, turn off \"Serial Enumerator\" in Device Manager under");
         Console.WriteLine("the port's Port Settings, Advanced.");
         Console.WriteLine("For lower USB latency, set the adapter latency timer to 1 ms.");
+        Console.WriteLine($"Intra-frame USB read gaps >= {frameGapSuspectMilliseconds:F2} ms are flagged SUSPECT_GAP");
+        Console.WriteLine($"(approx. Modbus t3.5 end-of-frame silence at {baudRate} baud; a host-side approximation, not on-wire).");
         Console.WriteLine("Frames are marked REQUEST, RESPONSE, or AMBIGUOUS when Modbus layouts overlap,");
         Console.WriteLine("and tagged with the Modbus function name (for example Read Holding Registers).");
         Console.WriteLine($"Logging to {logFilePath}");
@@ -126,9 +147,9 @@ internal class Program
         SerialPort serialPort,
         CaptureLog log,
         ModbusSettings settings,
+        double frameGapSuspectMilliseconds,
         CancellationToken cancellationToken)
     {
-        byte[] buffer = new byte[ReadBufferSize];
         var receivedBytes = new List<byte>();
         PendingRequest? pendingRequest = null;
         LastResponse? lastResponse = null;
@@ -136,23 +157,41 @@ internal class Program
         long previousUsbTransmissionTimestamp = 0;
         var frameTransport = new FrameTransport();
 
-        while (!cancellationToken.IsCancellationRequested)
+        // The serial port is drained on its own above-normal-priority thread (see
+        // SerialReader). Framing, CRC checks and logging run here on the consumer
+        // thread, so their cost can never delay the next read and inflate the
+        // inter-read gap the sniffer reports as an on-wire timing proxy.
+        using var reader = new SerialReader(serialPort, cancellationToken);
+        foreach (SerialSegment segment in reader.Consume())
         {
-            try
+            switch (segment.Kind)
             {
-                int bytesRead = serialPort.Read(buffer, 0, buffer.Length);
-                UsbTransmission usbTransmission = CreateUsbTransmission(++usbTransmissionNumber, bytesRead, ref previousUsbTransmissionTimestamp);
-                ProcessReceivedBytes(receivedBytes, buffer.AsSpan(0, bytesRead), log, ref pendingRequest, ref lastResponse, usbTransmission, frameTransport, settings.MasterDelayThresholdMilliseconds);
-            }
-            catch (TimeoutException)
-            {
-                PrintIncompleteBytes(receivedBytes, log, frameTransport);
-            }
-            catch (IOException exception)
-            {
-                Console.Error.WriteLine($"Serial read failed on {serialPort.PortName}: {exception.Message}");
-                Console.Error.WriteLine("The adapter may have been removed. Stopping capture.");
-                return;
+                case SerialSegmentKind.Data:
+                    UsbTransmission usbTransmission = CreateUsbTransmission(
+                        ++usbTransmissionNumber,
+                        segment.Bytes.Length,
+                        segment.Timestamp,
+                        ref previousUsbTransmissionTimestamp);
+                    ProcessReceivedBytes(
+                        receivedBytes,
+                        segment.Bytes,
+                        log,
+                        ref pendingRequest,
+                        ref lastResponse,
+                        usbTransmission,
+                        frameTransport,
+                        settings.MasterDelayThresholdMilliseconds,
+                        frameGapSuspectMilliseconds);
+                    break;
+
+                case SerialSegmentKind.Timeout:
+                    PrintIncompleteBytes(receivedBytes, log, frameTransport, frameGapSuspectMilliseconds);
+                    break;
+
+                case SerialSegmentKind.Fault:
+                    Console.Error.WriteLine($"Serial read failed on {serialPort.PortName}: {segment.FaultMessage}");
+                    Console.Error.WriteLine("The adapter may have been removed. Stopping capture.");
+                    return;
             }
         }
     }
@@ -191,9 +230,8 @@ internal class Program
         }
     }
 
-    private static UsbTransmission CreateUsbTransmission(long transmissionNumber, int byteCount, ref long previousTransmissionTimestamp)
+    private static UsbTransmission CreateUsbTransmission(long transmissionNumber, int byteCount, long currentTimestamp, ref long previousTransmissionTimestamp)
     {
-        long currentTimestamp = Stopwatch.GetTimestamp();
         double gapMilliseconds = previousTransmissionTimestamp == 0
             ? 0
             : (currentTimestamp - previousTransmissionTimestamp) * 1000d / Stopwatch.Frequency;
@@ -201,6 +239,14 @@ internal class Program
         previousTransmissionTimestamp = currentTimestamp;
         return new UsbTransmission(transmissionNumber, byteCount, gapMilliseconds);
     }
+
+    // Modbus RTU inter-frame gap (t3.5). MODBUS over Serial Line V1.02 fixes this
+    // at 1.750 ms for baud rates above 19200; below that it is 3.5 character
+    // times, where a character is the Modbus-standard 11 bits (start, 8 data,
+    // parity, stop). A silence this long inside a response is what makes the
+    // receiving device treat the frame as finished.
+    internal static double ComputeFrameGapThresholdMilliseconds(int baudRate) =>
+        baudRate > 19200 ? 1.75 : 3.5 * 11_000d / baudRate;
 
     private static void ProcessReceivedBytes(
         List<byte> receivedBytes,
@@ -210,7 +256,8 @@ internal class Program
         ref LastResponse? lastResponse,
         UsbTransmission usbTransmission,
         FrameTransport frameTransport,
-        int masterDelayThresholdMilliseconds)
+        int masterDelayThresholdMilliseconds,
+        double frameGapSuspectMilliseconds)
     {
         receivedBytes.AddRange(bytes);
 
@@ -241,7 +288,7 @@ internal class Program
                     lastResponse = new LastResponse(frame[0], (byte)(frame[1] & 0x7F), observedAt);
                 }
 
-                PrintFrame(label, frame, log, frameTransport, includeModbusHeader: true, responseTimeMilliseconds);
+                PrintFrame(label, frame, log, frameTransport, includeModbusHeader: true, responseTimeMilliseconds, frameGapSuspectMilliseconds: frameGapSuspectMilliseconds);
                 frameTransport.Reset();
                 continue;
             }
@@ -252,7 +299,7 @@ internal class Program
             }
 
             frameTransport.Add(usbTransmission);
-            PrintFrame("TRUNCATED_BY_REQUEST", CollectionsMarshal.AsSpan(receivedBytes)[..requestStart], log, frameTransport);
+            PrintFrame("TRUNCATED_BY_REQUEST", CollectionsMarshal.AsSpan(receivedBytes)[..requestStart], log, frameTransport, frameGapSuspectMilliseconds: frameGapSuspectMilliseconds);
             receivedBytes.RemoveRange(0, requestStart);
             frameTransport.Reset();
         }
@@ -471,14 +518,14 @@ internal class Program
         return bytes[frameLength - 2] == (byte)crc && bytes[frameLength - 1] == (byte)(crc >> 8);
     }
 
-    private static void PrintIncompleteBytes(List<byte> receivedBytes, CaptureLog log, FrameTransport frameTransport)
+    private static void PrintIncompleteBytes(List<byte> receivedBytes, CaptureLog log, FrameTransport frameTransport, double frameGapSuspectMilliseconds)
     {
         if (receivedBytes.Count == 0)
         {
             return;
         }
 
-        PrintFrame("INCOMPLETE", CollectionsMarshal.AsSpan(receivedBytes), log, frameTransport);
+        PrintFrame("INCOMPLETE", CollectionsMarshal.AsSpan(receivedBytes), log, frameTransport, frameGapSuspectMilliseconds: frameGapSuspectMilliseconds);
         receivedBytes.Clear();
         frameTransport.Reset();
     }
@@ -490,13 +537,17 @@ internal class Program
         FrameTransport frameTransport,
         bool includeModbusHeader = false,
         double? responseTimeMilliseconds = null,
-        double? masterDelayMilliseconds = null)
+        double? masterDelayMilliseconds = null,
+        double frameGapSuspectMilliseconds = 0)
     {
         string? functionName = includeModbusHeader ? FunctionName(bytes[1]) : null;
         string modbusHeader = includeModbusHeader
             ? $" address={bytes[0]}(0x{bytes[0]:X2}) function=0x{(bytes[1] & 0x7F):X2} ({functionName}) length={bytes.Length}"
             : string.Empty;
-        var line = new StringBuilder($"[{label}{modbusHeader} {frameTransport}] ");
+        bool suspectGap = frameGapSuspectMilliseconds > 0
+            && frameTransport.MaximumGapMilliseconds >= frameGapSuspectMilliseconds;
+        string suspectGapMarker = suspectGap ? " SUSPECT_GAP" : string.Empty;
+        var line = new StringBuilder($"[{label}{modbusHeader} {frameTransport}{suspectGapMarker}] ");
 
         foreach (byte value in bytes)
         {
@@ -516,7 +567,8 @@ internal class Program
             responseTimeMilliseconds,
             masterDelayMilliseconds,
             Convert.ToHexString(bytes),
-            functionName);
+            functionName,
+            suspectGap);
         captureRecords.Add(captureRecord);
         log.Write(line.ToString(), JsonSerializer.Serialize(captureRecord));
     }
@@ -619,6 +671,7 @@ internal class Program
         report.AppendLine($"Generated: {DateTimeOffset.Now:G}");
         report.AppendLine($"Total records: {captureRecords.Count}");
         report.AppendLine($"Total errors: {errorRecords.Length}");
+        report.AppendLine($"Frames flagged SUSPECT_GAP (intra-frame USB gap >= t3.5): {captureRecords.Count(record => record.SuspectGap)}");
         report.AppendLine("RESPONSE_MISMATCH and RESPONSE_WITHOUT_REQUEST = CRC-valid protocol-sequence errors.");
         report.AppendLine("INCOMPLETE and TRUNCATED_BY_REQUEST = response data did not form a CRC-valid frame.");
         report.AppendLine("NO_RESPONSE = a new request arrived while the prior request was still awaiting a response.");
@@ -1055,6 +1108,98 @@ internal class Program
         private readonly record struct Line(string? ConsoleLine, string? LogLine);
     }
 
+    private enum SerialSegmentKind
+    {
+        Data,
+        Timeout,
+        Fault
+    }
+
+    // One delivery from the serial port: the bytes handed over by a single
+    // SerialPort.Read, plus the high-resolution timestamp taken the instant that
+    // read returned. Timeout and Fault carry no bytes.
+    private readonly record struct SerialSegment(SerialSegmentKind Kind, long Timestamp, byte[] Bytes, string? FaultMessage)
+    {
+        public static SerialSegment Data(long timestamp, byte[] bytes) => new(SerialSegmentKind.Data, timestamp, bytes, null);
+
+        public static SerialSegment Timeout() => new(SerialSegmentKind.Timeout, 0, [], null);
+
+        public static SerialSegment Fault(string message) => new(SerialSegmentKind.Fault, 0, [], message);
+    }
+
+    // Drains the serial port on a dedicated above-normal-priority thread that does
+    // nothing but pull bytes and stamp their arrival time. Framing, CRC checks,
+    // matching and logging all run on the consumer thread, so a slow parse can
+    // never push out the next read and distort the inter-read gap the sniffer
+    // reports as an on-wire timing proxy.
+    private sealed class SerialReader : IDisposable
+    {
+        private readonly SerialPort port;
+        private readonly CancellationToken cancellationToken;
+        private readonly BlockingCollection<SerialSegment> segments = new();
+        private readonly Thread worker;
+
+        public SerialReader(SerialPort port, CancellationToken cancellationToken)
+        {
+            this.port = port;
+            this.cancellationToken = cancellationToken;
+            worker = new Thread(Run)
+            {
+                IsBackground = true,
+                Name = "serial-reader",
+                Priority = ThreadPriority.AboveNormal
+            };
+            worker.Start();
+        }
+
+        public IEnumerable<SerialSegment> Consume() => segments.GetConsumingEnumerable();
+
+        public void Dispose()
+        {
+            worker.Join();
+            segments.Dispose();
+        }
+
+        private void Run()
+        {
+            byte[] buffer = new byte[ReadBufferSize];
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    int bytesRead;
+                    try
+                    {
+                        bytesRead = port.Read(buffer, 0, buffer.Length);
+                    }
+                    catch (TimeoutException)
+                    {
+                        segments.Add(SerialSegment.Timeout());
+                        continue;
+                    }
+
+                    long timestamp = Stopwatch.GetTimestamp();
+                    if (bytesRead > 0)
+                    {
+                        segments.Add(SerialSegment.Data(timestamp, buffer.AsSpan(0, bytesRead).ToArray()));
+                    }
+                }
+            }
+            catch (Exception exception) when (
+                exception is IOException or OperationCanceledException or ObjectDisposedException or InvalidOperationException)
+            {
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    segments.Add(SerialSegment.Fault(exception.Message));
+                }
+            }
+            finally
+            {
+                segments.CompleteAdding();
+            }
+        }
+    }
+
     private sealed class ModbusSettings
     {
         public string PortName { get; private set; } = "COM7";
@@ -1067,6 +1212,14 @@ internal class Program
         public bool RtsEnable { get; private set; }
         public int PartialFrameTimeoutMilliseconds { get; private set; } = 100;
         public int MasterDelayThresholdMilliseconds { get; private set; } = 400;
+
+        // Intra-frame USB read gap at or above which a frame is flagged
+        // SUSPECT_GAP. 0 means derive it from the baud rate (Modbus t3.5).
+        public double FrameGapSuspectMilliseconds { get; private set; }
+
+        // Latency timer (ms) to program into an FTDI adapter through the D2XX API
+        // before the port is opened. 0 disables the call (non-FTDI adapters).
+        public int FtdiLatencyTimerMilliseconds { get; private set; } = 1;
 
         public static ModbusSettings Load(string filePath)
         {
@@ -1084,7 +1237,9 @@ internal class Program
                     "DtrEnable=false",
                     "RtsEnable=false",
                     "PartialFrameTimeoutMilliseconds=100",
-                    "MasterDelayThresholdMilliseconds=400"
+                    "MasterDelayThresholdMilliseconds=400",
+                    "FrameGapSuspectMilliseconds=0",
+                    "FtdiLatencyTimerMilliseconds=1"
                 ]);
                 return settings;
             }
@@ -1129,6 +1284,12 @@ internal class Program
                     case "MasterDelayThresholdMilliseconds":
                         if (int.TryParse(parts[1], out int masterDelay) && masterDelay >= 0) settings.MasterDelayThresholdMilliseconds = masterDelay;
                         break;
+                    case "FrameGapSuspectMilliseconds":
+                        if (double.TryParse(parts[1], System.Globalization.CultureInfo.InvariantCulture, out double frameGapSuspect) && frameGapSuspect >= 0) settings.FrameGapSuspectMilliseconds = frameGapSuspect;
+                        break;
+                    case "FtdiLatencyTimerMilliseconds":
+                        if (int.TryParse(parts[1], out int ftdiLatency) && ftdiLatency >= 0) settings.FtdiLatencyTimerMilliseconds = ftdiLatency;
+                        break;
                 }
             }
 
@@ -1153,7 +1314,8 @@ internal class Program
         double? ResponseTimeMilliseconds,
         double? MasterDelayMilliseconds,
         string Hex,
-        string? FunctionName = null);
+        string? FunctionName = null,
+        bool SuspectGap = false);
 
     private readonly record struct UsbTransmission(long Number, int ByteCount, double GapMilliseconds);
 
