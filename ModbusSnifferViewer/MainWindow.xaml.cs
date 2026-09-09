@@ -315,23 +315,77 @@ public partial class MainWindow : System.Windows.Window
         public double MaximumGapMilliseconds { get; init; }
         public bool IsError { get; init; }
         public string Details { get; init; } = string.Empty;
-        public string SearchText => $"{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Label} {Address} {AddressDecimal} {Function} {FunctionName} {Length} {UsbTransmissions} {ResponseTimeMilliseconds} {MaximumGapMilliseconds} {Details}";
+        public string SearchText => $"{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Label} {Address} {AddressDecimal} {Function} {FunctionName} {Length} {RequestQuantity} {ResponseQuantity} {UsbTransmissions} {ResponseTimeMilliseconds} {MaximumGapMilliseconds} {Details}";
 
-        // The received frame length split by direction: a request-shaped frame
-        // fills RequestLength, a response-shaped one fills ResponseLength, and an
-        // AMBIGUOUS frame (layouts overlap) fills both. Markers with no frame
-        // (NO_RESPONSE, MASTER_DELAY) and undecoded runs (INCOMPLETE, TRUNCATED)
-        // fill neither.
-        public int? RequestLength => Length > 0 && (IsRequest || IsAmbiguous) ? Length : null;
-        public int? ResponseLength => Length > 0 && (IsResponse || IsAmbiguous) ? Length : null;
+        // Quantity of registers/coils named in the frame, decoded from the hex:
+        // for a request it is the "quantity" field; for a read response it is
+        // derived from the returned byte count; for a write response it is the
+        // echoed quantity. Blank where the function carries no such count
+        // (single writes, mask write, exceptions, partial/undecoded frames).
+        public int? RequestQuantity
+        {
+            get
+            {
+                if (!IsRequest || FrameBytes.Length < 6)
+                {
+                    return null;
+                }
+
+                return FunctionCode switch
+                {
+                    0x01 or 0x02 or 0x03 or 0x04 or 0x0F or 0x10 or 0x17 => (FrameBytes[4] << 8) | FrameBytes[5],
+                    _ => null
+                };
+            }
+        }
+
+        public int? ResponseQuantity
+        {
+            get
+            {
+                if (!IsResponse || FrameBytes.Length < 3 || (FrameBytes[1] & 0x80) != 0)
+                {
+                    return null;
+                }
+
+                return FunctionCode switch
+                {
+                    0x03 or 0x04 or 0x17 => FrameBytes[2] / 2,
+                    0x01 or 0x02 => FrameBytes[2] * 8,
+                    0x0F or 0x10 when FrameBytes.Length >= 6 => (FrameBytes[4] << 8) | FrameBytes[5],
+                    _ => null
+                };
+            }
+        }
 
         private bool IsRequest => Label.StartsWith("REQUEST", StringComparison.Ordinal);
-        private bool IsAmbiguous => Label.StartsWith("AMBIGUOUS", StringComparison.Ordinal);
         private bool IsResponse =>
             Label.StartsWith("MATCHED_RESPONSE", StringComparison.Ordinal) ||
             Label.StartsWith("MATCHED_EXCEPTION", StringComparison.Ordinal) ||
             Label.StartsWith("RESPONSE_MISMATCH", StringComparison.Ordinal) ||
             Label.StartsWith("RESPONSE_WITHOUT_REQUEST", StringComparison.Ordinal);
+
+        private int? FunctionCode => FrameBytes.Length >= 2 ? FrameBytes[1] & 0x7F : null;
+
+        private byte[]? frameBytes;
+        private byte[] FrameBytes => frameBytes ??= ParseHexFrame(Details);
+
+        private static byte[] ParseHexFrame(string text)
+        {
+            if (text.Length < 4 || text.Length % 2 != 0)
+            {
+                return [];
+            }
+
+            try
+            {
+                return Convert.FromHexString(text);
+            }
+            catch (FormatException)
+            {
+                return [];
+            }
+        }
 
         public string Type =>
             Label.StartsWith("MATCHED_EXCEPTION", StringComparison.Ordinal) ? "MATCHED_EXCEPTION_RESPONSE" :

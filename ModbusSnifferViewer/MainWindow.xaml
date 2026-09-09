@@ -72,8 +72,8 @@
                 <DataGridTextColumn Header="Function" Binding="{Binding Function}" Width="65" />
                 <DataGridTextColumn Header="Function name" Binding="{Binding FunctionName}" Width="175" />
                 <DataGridTextColumn Header="Recv len" Binding="{Binding Length}" Width="65" />
-                <DataGridTextColumn Header="Req len" Binding="{Binding RequestLength}" Width="60" />
-                <DataGridTextColumn Header="Resp len" Binding="{Binding ResponseLength}" Width="62" />
+                <DataGridTextColumn Header="Req qty" Binding="{Binding RequestQuantity}" Width="60" />
+                <DataGridTextColumn Header="Resp qty" Binding="{Binding ResponseQuantity}" Width="62" />
                 <DataGridTextColumn Header="USB transmissions" Binding="{Binding UsbTransmissions}" Width="115" />
                 <DataGridTextColumn Header="Response ms" Binding="{Binding ResponseTimeMilliseconds, StringFormat={}{0:F1}}" Width="90" />
                 <DataGridTextColumn Header="Max gap ms" Binding="{Binding MaximumGapMilliseconds, StringFormat={}{0:F3}}" Width="90" />
